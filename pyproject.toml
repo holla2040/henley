@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "henley"
+version = "0.1.0"
+description = "Query the JLCPCB parts inventory and cross-check Fusion Electronics BOMs to speed up PCBA submissions."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Proprietary" }
+authors = [{ name = "holla" }]
+dependencies = [
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+# RSA field tokenization is only needed for order placement (addresses, etc.),
+# not for read-only parts queries. Keep the core install dependency-light.
+privacy = ["cryptography>=42"]
+dev = ["pytest>=8", "ruff>=0.4"]
+
+[project.scripts]
+henley = "henley.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

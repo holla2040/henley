@@ -1,0 +1,32 @@
+# Secrets — NEVER commit
+.keys
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.env
+
+# Tooling
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Reference JLCPCB Java SDK jars — NOT distributed; download them yourself
+sdk/
+
+# Generated Fusion parts export (design-specific output)
+henley_parts.json
+
+# Decompiled SDK / scratch artifacts
+scratch-*/
+*.local
+
+# OS
+.DS_Store

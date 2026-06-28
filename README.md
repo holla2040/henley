@@ -1,0 +1,261 @@
+# Henley
+
+A small Python tool for querying the **JLCPCB** parts inventory (LCSC / JLC
+components) and — going forward — for consolidating part information pulled
+directly from **Autodesk Fusion Electronics**, so you can validate part
+availability and speed up JLCPCB **PCB Assembly (PCBA)** order submissions.
+
+> Named after James Garner's character in the film *The Dirty Dozen*.
+
+Henley is a Python reimplementation of JLCPCB's official Java OpenAPI SDK. The
+reverse-engineered API contract is documented in
+[`docs/api-reference.md`](docs/api-reference.md).
+
+> **Note:** the reference JLCPCB Java SDK jars are **not** distributed with this
+> repo. You don't need them to run Henley — they were only used to reverse-
+> engineer the contract. If you want to cross-check against them, download the
+> Core + Business SDK jars from JLCPCB yourself and drop them in a local `sdk/`
+> directory (git-ignored).
+
+## What it does today
+
+Read-only component (parts inventory) endpoints, signed with JLCPCB's `JOP`
+authentication scheme, exposed through a `henley` CLI and a small Python API:
+
+- Look up full component detail (price tiers, stock, parameters, datasheet).
+- Browse the assembly component library.
+- List your private / consigned JLC inventory.
+- Verify that your credentials and request signing are working.
+
+## Install
+
+Requires **Python >= 3.10**. The core install depends only on `requests`.
+
+```bash
+git clone git@github.com:holla2040/henley.git
+cd henley
+python -m venv .venv
+source .venv/bin/activate
+pip install -e .
+```
+
+Optional extras:
+
+```bash
+pip install -e ".[privacy]"   # cryptography — RSA field tokenization for order placement
+pip install -e ".[dev]"       # pytest, ruff
+```
+
+### Set your JLC API keys (required)
+
+Henley authenticates every request with JLCPCB OpenAPI credentials. Without them
+the CLI cannot reach the API. The credentials are **not** committed — they are
+read at runtime from a **`.keys` file you create at the project root** (the
+repo's `.gitignore` already excludes `.keys`, `*.pem`, and `*.key` so they can
+never be committed).
+
+1. Get your credentials from the JLCPCB developer console (`api.jlcpcb.com`):
+   **AppID**, **Accesskey**, and **SecretKey**.
+2. Create **`.keys`** in the repo root (same folder as `pyproject.toml`) with
+   this exact layout (placeholders shown — substitute your own values):
+
+   ```
+   JLCAPI:
+       AppID:     <your-app-id>
+       Accesskey: <your-access-key>
+       SecretKey: <your-secret-key>
+
+   Tokenization Key RSA
+       Public:
+   <base64-rsa-public-key>
+       Private
+   <base64-rsa-private-key>
+   ```
+
+   The `Tokenization Key RSA` block is only needed for **order placement** and
+   may be omitted for read-only parts queries.
+3. Alternatively, point `HENLEY_KEYS` at a `.keys` file elsewhere
+   (see [Environment variables](#environment-variables)).
+
+See [Configuration](#configuration) for full details on the file format and
+discovery order.
+
+## Quickstart
+
+1. Install and set your `.keys` file as above.
+2. Verify credentials and signing:
+
+```bash
+henley ping
+```
+
+`ping` distinguishes the two states you might hit:
+
+- **Signing OK, permission missing** — the request authenticated correctly but
+  your app lacks the component API permission. Enable it for your app in the
+  JLC developer console, then retry.
+- **Signature rejected** — check the `AppID` / `Accesskey` / `SecretKey` in
+  `.keys`.
+
+## CLI command reference
+
+```
+henley [--keys PATH] <command> [options]
+```
+
+| Command | Description |
+|---------|-------------|
+| `henley ping` | Verify credentials + signing; reports whether signing works and whether the component API permission is enabled. |
+| `henley detail C2040 [C... ...]` | Full component detail for one or more JLC component codes (price tiers, stock, parameters, datasheet). |
+| `henley private [--page N] [--limit N]` | Your private / consigned JLC inventory. |
+| `henley library [--limit N]` | Browse the assembly component library. |
+| `henley fusion PARTS.json [--no-enrich]` | Ingest a Fusion parts-export JSON and enrich each part against JLC (stock, price tiers, basic/extended). `--no-enrich` validates the file offline without calling the API. |
+
+`--keys PATH` overrides credential discovery for any command.
+
+## Python usage
+
+```python
+from henley import JLCClient
+
+client = JLCClient()
+
+# Full detail by component code
+detail = client.get_component_detail_by_code(["C2040"])
+
+# One page of the assembly component library
+page = client.get_component_library_list(page_size=30)
+
+# Iterate the entire library (follows the lastKey cursor)
+for row in client.iter_component_library():
+    print(row["componentCode"], row["componentModel"])
+
+# Your private / consigned inventory
+private = client.get_private_component_library(current_page=1, page_size=30)
+```
+
+## Configuration
+
+### `.keys` file
+
+Credentials are loaded at runtime from a **git-ignored** `.keys` file at the
+project root (it is parsed by `src/henley/config.py`). They are never hardcoded
+and never committed. The file is the one issued by JLCPCB and uses this format
+(placeholders shown — substitute your own values):
+
+```
+JLCAPI:
+    AppID:     <your-app-id>
+    Accesskey: <your-access-key>
+    SecretKey: <your-secret-key>
+
+Tokenization Key RSA
+    Public:
+<base64-rsa-public-key>
+    Private
+<base64-rsa-private-key>
+```
+
+The `Tokenization Key RSA` block is only used for **order placement** (it
+encrypts sensitive fields such as shipping addresses). Read-only parts queries
+do not need it, so it is parsed best-effort and may be absent.
+
+### Environment variables
+
+| Variable | Effect |
+|----------|--------|
+| `HENLEY_KEYS` | Path to the `.keys` file (overrides discovery). |
+| `HENLEY_ENDPOINT` | Override the API host. |
+
+Path resolution order for credentials: the `--keys` / explicit argument, then
+`HENLEY_KEYS`, then a `.keys` file discovered by walking up from the current
+working directory.
+
+## Endpoint and permissions
+
+- **API host:** `https://open.jlcpcb.com` (the default).
+  Note: `api.jlcpcb.com` is the developer **portal / console**, not the API
+  host.
+- **Auth scheme `JOP`:** every request carries
+  `Authorization: JOP appid="..",accesskey="..",timestamp="..",nonce="..",signature=".."`,
+  where `signature = Base64(HMAC_SHA256(secretKey, stringToSign))` and
+  `stringToSign = METHOD\nCANONICAL_URI\nTIMESTAMP\nNONCE\nPAYLOAD\n`.
+
+Signing has been verified empirically against the live API:
+
+- A **valid** signature returns `HTTP 403 {"code":403,"message":"API
+  insufficient permissions, access denied"}` for this account.
+- A **wrong** signature returns `HTTP 401 {"code":401,"message":"The request
+  signature verify failed"}`.
+
+So signing is proven correct — the account just needs the component API
+permission enabled in the JLC console.
+
+## Reading from Fusion Electronics (no MCP client required)
+
+Henley reads a live Autodesk Fusion design over **plain HTTP** — it issues
+JSON-RPC `POST`s directly to the local endpoint Fusion exposes at
+`http://127.0.0.1:27182/mcp`. **You do not need any MCP client or middleware**
+to use it: no Claude Desktop "Autodesk Fusion" extension, no MCP connector, and
+no `claude mcp add` registration. The endpoint speaks the MCP wire protocol, but
+from Henley's side it is just an HTTP API you `POST` to with `curl` / `requests`
+(`initialize` → `tools/call` with `fusion_mcp_electronics_read`). See
+[`docs/fusion-notes.md`](docs/fusion-notes.md) for the request shapes and where
+each part's JLC `Cxxxx` code lives (the part's `LCSC` attribute).
+
+The only requirement on the **Windows / Fusion side** is that Fusion is running
+with its built-in server enabled — **Preferences > General > API > Fusion MCP
+Server** — and an Electronics document open. That is what publishes the HTTP
+endpoint; nothing else needs to be installed.
+
+### Reaching it from WSL2 (optional networking note)
+
+If you run Henley on the same Windows machine as Fusion, `http://127.0.0.1:27182`
+just works. If you run it under **WSL2**, Windows loopback isn't reachable across
+the NAT boundary, so forward the port once on the **Windows** side (elevated
+PowerShell):
+
+```powershell
+# Windows, Run as Administrator — expose Fusion's loopback port to WSL
+netsh interface portproxy add v4tov4 listenaddress=0.0.0.0 listenport=27182 connectaddress=127.0.0.1 connectport=27182
+netsh advfirewall firewall add rule name="Fusion API WSL" dir=in action=allow protocol=TCP localport=27182
+```
+
+Then from WSL, reach Fusion at the WSL→Windows gateway IP
+(`ip route | grep default`, e.g. `http://172.17.64.1:27182/mcp`). That gateway IP
+can change across WSL restarts — re-check it if Fusion becomes unreachable.
+Remove the forward later with:
+
+```powershell
+netsh interface portproxy delete v4tov4 listenaddress=0.0.0.0 listenport=27182
+```
+
+## Security
+
+- `.keys` holds your AppID, access key, secret key, and (optionally) an RSA
+  tokenization keypair. It is listed in `.gitignore` and must **never** be
+  committed.
+- Credentials are loaded only at runtime; nothing is hardcoded in the source.
+- `*.pem` and `*.key` files are also git-ignored.
+
+## Roadmap
+
+1. **Fusion Electronics integration.** Henley will read designs **directly**
+   via the Autodesk Fusion API (currently read-only for electronics) — *not* by
+   exporting a BOM. A Fusion add-in / script will enumerate the electronic
+   design's components and their MPN / LCSC part attributes, then feed those
+   part numbers into Henley's JLC query layer to report availability, stock,
+   price tiers, and basic/extended (assembly) status — so you know what is
+   available before submitting a PCBA order. A stub module is planned at
+   `src/henley/fusion.py`.
+
+2. **PCBA order automation.** The JLC SDK also exposes PCB order endpoints
+   (`uploadGerber`, calculate price, create order). Address and other sensitive
+   fields are RSA-tokenized using the `Tokenization Key RSA` in `.keys`; the
+   optional `privacy` extra (`cryptography`) covers this. These endpoints are
+   mapped in [`docs/api-reference.md`](docs/api-reference.md) but not yet
+   wrapped.
+
+## License
+
+Proprietary.
