@@ -238,6 +238,50 @@ netsh interface portproxy delete v4tov4 listenaddress=0.0.0.0 listenport=27182
 - Credentials are loaded only at runtime; nothing is hardcoded in the source.
 - `*.pem` and `*.key` files are also git-ignored.
 
+## Project history — how this was built
+
+Henley exists because JLCPCB ships an official **Java** OpenAPI SDK but no Python
+one. Rather than wrap the Java SDK, the contract was **reverse-engineered from
+the JLCPCB Java SDK jars** (the Core SDK + Business SDK) and reimplemented as a
+small, dependency-light Python package.
+
+1. **Recover the contract from the jars.** The decompiled Java SDK was read to
+   recover: the component (parts inventory) endpoints and their request/response
+   value objects; the response envelope (`{ code, message, data }`); and the
+   serialization rules (fields emitted as **camelCase**, null fields **omitted**)
+   that the wire format depends on. The result is captured as the source of
+   truth in [`docs/api-reference.md`](docs/api-reference.md).
+2. **Pin the auth scheme.** JLCPCB's `JOP` authentication
+   (`Authorization: JOP appid=..,accesskey=..,timestamp=..,nonce=..,signature=..`)
+   was reproduced exactly from the SDK's signer: `signature =
+   Base64(HMAC_SHA256(secretKey, METHOD\nURI\nTIMESTAMP\nNONCE\nPAYLOAD\n))`.
+   `tests/test_auth.py` pins the Python implementation to the Java algorithm so
+   it can't drift.
+3. **Reimplement in pure Python.** `auth.py` (signing), `client.py` (signed
+   `POST` plumbing + the read-only component endpoints + envelope unwrap),
+   `config.py` (runtime `.keys` loading), and a `henley` CLI — core install
+   depends only on `requests`.
+4. **Verify against the live API.** Signing was confirmed empirically: a *valid*
+   signature returns `HTTP 403` (insufficient permissions) while a *wrong*
+   signature returns `HTTP 401` (signature verify failed) — proving the signing
+   is correct and that the remaining gate is account-side permission, not code.
+   It also confirmed the real API host is `https://open.jlcpcb.com`
+   (`api.jlcpcb.com` is the developer portal).
+
+That JLC reverse-engineering and Python reimplementation was done in Claude Code
+on **horton** (the Linux dev box), session
+`fd5ea0ac-6e74-4f38-8b3e-8435fc6f1512`.
+
+5. **Add the Fusion Electronics bridge.** On **hendrix** (the Windows box
+   running Autodesk Fusion), Henley was extended to read a live electronics
+   design over plain HTTP (see
+   [Reading from Fusion Electronics](#reading-from-fusion-electronics-no-mcp-client-required)).
+   Introspecting a real design answered the key open question — the JLCPCB
+   `Cxxxx` code is stored as each part's **`LCSC`** attribute — which lets the
+   extractor produce `henley_parts.json` and feed those codes straight into the
+   JLC query layer for stock/price enrichment. Details in
+   [`docs/fusion-notes.md`](docs/fusion-notes.md).
+
 ## Roadmap
 
 1. **Fusion Electronics integration.** Henley will read designs **directly**
