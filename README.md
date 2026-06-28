@@ -1,11 +1,14 @@
 # Henley
 
+<img src="image/henley.png" alt="Henley — James Garner as Hendley, 'the Scrounger', in The Great Escape" width="160" align="right">
+
 A small Python tool for querying the **JLCPCB** parts inventory (LCSC / JLC
 components) and — going forward — for consolidating part information pulled
 directly from **Autodesk Fusion Electronics**, so you can validate part
 availability and speed up JLCPCB **PCB Assembly (PCBA)** order submissions.
 
-> Named after James Garner's character in the film *The Dirty Dozen*.
+> Named after James Garner's character Hendley, "the Scrounger", in the film
+> *The Great Escape*.
 
 Henley is a Python reimplementation of JLCPCB's official Java OpenAPI SDK. The
 reverse-engineered API contract is documented in

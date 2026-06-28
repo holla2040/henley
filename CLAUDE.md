@@ -6,8 +6,8 @@
 components) and, going forward, to consolidate part info pulled directly from
 Autodesk Fusion Electronics — so the user can validate part availability and
 speed up JLCPCB **PCBA** order submissions. It is a Python reimplementation of
-JLCPCB's official Java OpenAPI SDK. (Named after James Garner's character in
-*The Dirty Dozen*.)
+JLCPCB's official Java OpenAPI SDK. (Named after James Garner's character
+Hendley, "the Scrounger", in *The Great Escape*.)
 
 ## Architecture / file map
 
