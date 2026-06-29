@@ -21,10 +21,20 @@ Hendley, "the Scrounger", in *The Great Escape*.)
   read-only component endpoints; `JLCError` and the `{code, success, message,
   data}` envelope unwrap.
 - `src/henley/cli.py` — argparse CLI; entry point `henley = henley.cli:main`.
-  Commands: `ping`, `detail`, `private`, `library`, `fusion`.
+  Commands: `ping`, `detail`, `private`, `library`, `fusion`, `stock`, `scr`.
+- `src/henley/scr.py` — Fusion `.scr` migration-script generator: `PartSwap`,
+  `load_swaps_json()`, `render_script()`. Turns a list of part swaps (designator
+  + package variant + attributes) into the EAGLE command-line script the user
+  runs in Fusion (`File > Execute Script`, or `neu_dev.run_text_command("SCRIPT
+  …")` in the text-command Py mode). The write side: the Electronics API is
+  read-only and the MCP bridge can't reach the command line, so Henley generates
+  the script and the user runs it. `CHANGE PACKAGE` precedes `ATTRIBUTE` per part
+  (variant switch can reset variant-default attrs); injection chars are rejected.
 - `src/henley/fusion.py` — Fusion Electronics bridge: the `DesignPart` model,
-  `load_parts_json()` (ingest the parts-export contract), and
-  `enrich_with_jlc()` (look up stock/price by JLC code). `extract_components()`
+  `load_parts_json()` (ingest the parts-export contract), `enrich_with_jlc()`
+  (look up stock/price by JLC code), and the inventory check —
+  `check_stock()`/`format_stock_report()` (classify each part out/low/not_found/
+  no_code/ok via one `getComponentDetailByCode` call). `extract_components()`
   is Fusion-side only (runs inside Fusion 360) — see HANDOFF.md.
 - `src/henley/__init__.py` — public API exports (`JLCClient`, `JLCError`,
   config helpers).

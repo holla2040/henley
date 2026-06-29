@@ -88,6 +88,49 @@ def _cmd_fusion(client: JLCClient, args) -> int:
     return 0
 
 
+def _cmd_stock(client: JLCClient, args) -> int:
+    """Inventory check: flag out-of-stock / problem parts before a board submission."""
+    from .fusion import STOCK_BLOCKERS, check_stock, format_stock_report, load_parts_json
+
+    parts = load_parts_json(args.parts_json)
+    rows = check_stock(parts, client, min_stock=args.min_stock)
+    if args.json:
+        _print(rows)
+    else:
+        print(format_stock_report(rows, min_stock=args.min_stock))
+    # Nonzero exit when any part is out of stock or missing from the catalog, so
+    # this can gate a submission step (e.g. `henley stock bom.json && submit`).
+    return 1 if any(r["status"] in STOCK_BLOCKERS for r in rows) else 0
+
+
+def _cmd_scr(client, args) -> int:
+    """Generate a Fusion ``.scr`` migration script from one or more swap files."""
+    from pathlib import Path
+
+    from .scr import load_swaps_json, render_script
+
+    swaps = []
+    design = args.design
+    for path in args.swaps_json:
+        swaps.extend(load_swaps_json(path))
+        if design is None:  # pick up "design" from the first file that names one
+            doc = json.loads(Path(path).read_text())
+            if isinstance(doc, dict) and doc.get("design"):
+                design = str(doc["design"])
+
+    script = render_script(swaps, design=design)
+    if args.output:
+        Path(args.output).write_text(script)
+        print(f"wrote {len(swaps)} swap(s) to {args.output}", file=sys.stderr)
+        print("run it in Fusion: File > Execute Script  (Electronics workspace active),\n"
+              "or in the text command line (Py): "
+              f'import neu_dev; neu_dev.run_text_command("SCRIPT {args.output}")',
+              file=sys.stderr)
+    else:
+        print(script, end="")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="henley", description="JLCPCB parts inventory client.")
     p.add_argument("--keys", help="Path to the .keys credentials file (overrides discovery).")
@@ -115,6 +158,20 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Parse and validate only; do not call the JLC API.")
     sp.set_defaults(func=_cmd_fusion)
 
+    sp = sub.add_parser("stock", help="Inventory check: flag out-of-stock/problem parts in a BOM.")
+    sp.add_argument("parts_json", help="Path to a Fusion parts-export JSON file.")
+    sp.add_argument("--min-stock", type=int, default=1,
+                    help="Flag parts below this stock as LOW (default 1: only flag out-of-stock).")
+    sp.add_argument("--json", action="store_true", help="Emit structured JSON instead of a report.")
+    sp.set_defaults(func=_cmd_stock)
+
+    sp = sub.add_parser("scr", help="Generate a Fusion .scr migration script from swap files.")
+    sp.add_argument("swaps_json", nargs="+",
+                    help="One or more swap JSON files; merged into one combo script.")
+    sp.add_argument("-o", "--output", help="Write the .scr here (default: stdout).")
+    sp.add_argument("--design", help="Design name for the script header (else read from JSON).")
+    sp.set_defaults(func=_cmd_scr)
+
     return p
 
 
@@ -122,8 +179,12 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     from .config import load_settings
 
-    # Offline parse mode needs no credentials.
-    needs_client = not (args.command == "fusion" and getattr(args, "no_enrich", False))
+    # Offline modes need no credentials: `scr` is pure generation; `fusion --no-enrich`
+    # only parses.
+    offline = args.command == "scr" or (
+        args.command == "fusion" and getattr(args, "no_enrich", False)
+    )
+    needs_client = not offline
     try:
         client = JLCClient(load_settings(args.keys)) if needs_client else None
         return args.func(client, args)

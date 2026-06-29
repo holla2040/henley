@@ -58,7 +58,12 @@ authentication scheme, exposed through a `henley` CLI and a small Python API:
 - Look up full component detail (price tiers, stock, parameters, datasheet).
 - Browse the assembly component library.
 - List your private / consigned JLC inventory.
+- **Inventory check** a BOM — flag out-of-stock / problem parts before a board
+  submission (`henley stock`).
 - Verify that your credentials and request signing are working.
+- Generate Fusion Electronics migration scripts (`.scr`) to batch part package
+  and attribute changes — see
+  [Writing changes back](#writing-changes-back-generating-scr-migration-scripts).
 
 ## Install
 
@@ -138,6 +143,8 @@ henley [--keys PATH] <command> [options]
 | `henley private [--page N] [--limit N]` | Your private / consigned JLC inventory. |
 | `henley library [--limit N]` | Browse the assembly component library. |
 | `henley fusion PARTS.json [--no-enrich]` | Ingest a Fusion parts-export JSON and enrich each part against JLC (stock, price tiers, basic/extended). `--no-enrich` validates the file offline without calling the API. |
+| `henley stock PARTS.json [--min-stock N] [--json]` | **Inventory check** — look up live stock for every part in a BOM and flag any that are out of stock, not found, or below `--min-stock`. Exits nonzero if any part is out-of-stock or not found, so it can gate a submission (`henley stock bom.json && submit`). |
+| `henley scr SWAPS.json [SWAPS2.json ...] [-o FILE.scr] [--design NAME]` | Generate a Fusion `.scr` migration script from one or more swap files (merged into one combo script). Emits the `CHANGE PACKAGE` + `ATTRIBUTE` commands you run in Fusion. Runs offline — no credentials needed. See [Writing changes back](#writing-changes-back-generating-scr-migration-scripts). |
 
 `--keys PATH` overrides credential discovery for any command.
 
@@ -281,6 +288,123 @@ Remove the (correct) gateway forward when you're done with:
 netsh interface portproxy delete v4tov4 listenaddress=172.17.64.1 listenport=27182
 ```
 
+## Migration workflow (driven in Claude Code)
+
+Henley's two halves — **reading** a live design over the Fusion bridge and
+**generating** a `.scr` to change parts — are glued together by an interactive
+[Claude Code](https://claude.com/claude-code) session run from this repo. Claude
+drives the bridge reads and the JLC lookups; **you** make the design decisions
+and run the final script in Fusion. This is the start-to-finish loop.
+
+**Before you start**
+
+1. Fusion is running with an **Electronics document open** and the **MCP Server
+   enabled** (see [Reading from Fusion Electronics](#reading-from-fusion-electronics-no-mcp-client-required)).
+2. If you run under WSL2, the port forward is up (same section,
+   [networking note](#reaching-it-from-wsl2-networking-note)).
+3. Your `.keys` file is in place and `pip install -e .` is done.
+4. **No modal dialog is open in Fusion.** An open dialog (e.g. the *Attributes
+   of Rn* editor) silently blocks the bridge — every read comes back empty.
+
+**The loop**
+
+1. Open the design in Fusion. Start Claude Code in the `henley` repo directory.
+2. **Ask Claude to read the live design** — e.g. *"read the comet design and list
+   the resistors with their values and package variants."* Claude `POST`s to the
+   Fusion endpoint and reports designators, values, and the **exact package
+   variant names** available on each deviceset (these are literal library names —
+   often with a leading hyphen, like `-0402`, not `0402`).
+3. **Decide the swaps with Claude.** Claude can look up candidate JLC
+   replacements (`henley detail Cxxxx`), check stock and Basic-vs-Extended, and
+   record the result as a worksheet (see
+   [`docs/comet-0402-migration.md`](docs/comet-0402-migration.md) for the shape).
+4. **Claude writes a `swaps.json` and runs the generator** —
+   `henley scr swaps.json -o migration.scr` (see [Writing changes back](#writing-changes-back-generating-scr-migration-scripts)
+   for the file format and a worked example).
+5. **You run `migration.scr` in Fusion** — *File > Execute Script*, or the
+   `neu_dev.run_text_command("SCRIPT …")` line in the text-command Py mode.
+6. **Ask Claude to re-read the design and verify** each part landed on the new
+   variant and attributes.
+7. **Save in Fusion** once you're happy.
+
+**Gotchas worth knowing up front**
+
+- Close any modal dialog in Fusion before asking Claude to read — an open dialog
+  makes the bridge return empty responses.
+- The Fusion Electronics API is **read-only**; Claude cannot apply changes for
+  you. The `.scr` is yours to run (step 5) — that's the only write path.
+- A `.scr` **stops at the first failing command**, which can leave a partial
+  migration. Verify variant names before a large batch and keep the run undoable.
+
+## Writing changes back: generating `.scr` migration scripts
+
+The Fusion Electronics **API is read-only** — neither the live bridge above nor
+Fusion's add-in Python can change a part's package or write its attributes (the
+electronics objects expose getters, no setters). The one channel that *can* edit
+a design is the EAGLE-heritage **command line**, driven by a `.scr` script.
+
+So Henley does the half it can: it **generates the `.scr`** from a table of
+swaps; **you run it** in Fusion. This is ideal for batch edits — migrating dozens
+or hundreds of resistors to a new package, repointing parts to new JLC codes —
+without clicking each part by hand.
+
+Describe the changes in a swap JSON file (object with a `swaps` list, or a bare
+list). Only `designator` is required per swap:
+
+```json
+{
+  "design": "comet",
+  "swaps": [
+    {
+      "designator": "R1",
+      "package": "-0402",
+      "lcsc": "C25768",
+      "manufacturer": "UNI-ROYAL",
+      "mpn": "0402WGF2202TCE",
+      "attributes": { "DESC": "1%" }
+    }
+  ]
+}
+```
+
+- `package` is the library **variant name** — note it is the exact name from the
+  device, often with a leading hyphen (e.g. `-0402`, not `0402`). Omit it to
+  change attributes only.
+- `lcsc` / `manufacturer` / `mpn` are conveniences that map to the `LCSC` /
+  `MANUFACTURER` / `MPN` attributes; `attributes` carries any other attribute
+  (e.g. `DESC`) and overrides the conveniences.
+
+Generate the script (offline — no credentials needed). Multiple swap files merge
+into one combo script you execute once:
+
+```bash
+henley scr swaps.json -o henley.scr
+henley scr 22k.json 10k.json 220r.json -o migration.scr   # combo
+```
+
+Each swap renders as the command block `CHANGE PACKAGE` **before** the
+`ATTRIBUTE` lines (switching the variant can reset variant-default attributes, so
+the values are written afterward):
+
+```
+CHANGE PACKAGE '-0402' R1;
+ATTRIBUTE R1 LCSC 'C25768';
+ATTRIBUTE R1 MANUFACTURER 'UNI-ROYAL';
+ATTRIBUTE R1 MPN '0402WGF2202TCE';
+ATTRIBUTE R1 DESC '1%';
+```
+
+Then run it in Fusion (Electronics workspace active), either way:
+
+- **File > Execute Script**, and pick `henley.scr`; or
+- the text command line in **Python (`Py`)** mode (File > View > Show Text
+  Commands): `import neu_dev; neu_dev.run_text_command("SCRIPT C:\\path\\henley.scr")`.
+
+> ⚠️ A `.scr` runs as a sequence of commands and will stop at the first one that
+> fails (e.g. a variant name that doesn't exist on that part), which can leave a
+> **partial** migration. Sanity-check variant names against the design before
+> running a large batch, and keep the run undoable.
+
 ## Security
 
 - `.keys` holds your AppID, access key, and secret key. It is listed in
@@ -349,6 +473,45 @@ on **horton** (the Linux dev box), session
    endpoints are mapped in [`docs/api-reference.md`](docs/api-reference.md) but
    not yet wrapped — when they are, this is where the RSA tokenization key (and
    a `cryptography` dependency) would come back in.
+
+## Future enhancement: streamlining JLCPCB board submission
+
+> **Earmarked, not yet scoped.** This is a known pain point we intend to address
+> later; nothing here is implemented. Captured so we don't lose the problem.
+
+Submitting a PCBA order through the JLCPCB **website** is one of the slowest,
+most tedious parts of the whole workflow. The order form validates your uploads
+*after* you submit them, so it becomes a back-and-forth loop:
+
+- **BOM errors.** If the Bill of Materials has a problem — an out-of-stock part,
+  an unrecognized or mismatched component, a column the parser doesn't like — you
+  have to fix the BOM and **re-upload it**. In practice this happens *repeatedly*:
+  one fix surfaces the next issue, and each round is a full upload-and-revalidate
+  cycle.
+- **CPL / placement errors.** Likewise, if the Component Placement List (CPL,
+  the pick-and-place file) has a problem — a missing or off placement, a rotation
+  or origin mismatch — you have to correct it and **upload a new CPL file**, then
+  wait for revalidation again.
+
+This upload → validate → fix → re-upload churn, alternating between BOM and CPL,
+eats a lot of time and is the main bottleneck in getting an order placed.
+
+**What to investigate.** Whether the JLCPCB **API** (the order/PCBA endpoints
+already documented in [`docs/api-reference.md`](docs/api-reference.md) but not yet
+wrapped — gerber/BOM/CPL upload, price calculation, order creation) lets us move
+this validation *off* the website and *into* Henley, so problems are caught and
+fixed **before** the tedious manual round-trips. The two highest-value targets
+are exactly the two error classes above:
+
+- **Inventory / BOM pre-validation** — check every part's stock and
+  Basic/Extended status against the JLC API up front (building on Henley's
+  existing component lookups and the part-substitution work) so out-of-stock or
+  problem parts are resolved *before* submission, not discovered mid-upload.
+- **Placement / CPL pre-validation** — sanity-check the CPL against the design
+  (designators, rotations, coordinates) before it ever reaches the website.
+
+Goal: turn order submission from a slow, error-prone website loop into a
+prepared, pre-validated package — ideally driven (or submitted) through the API.
 
 ## License
 
