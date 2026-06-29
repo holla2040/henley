@@ -146,6 +146,12 @@ below — to get its designator and the exact package variant names.) Drive it a
    Then `henley scr swap.json -o changes.scr` (offline). The script carries the
    **package variant and the attributes** — `CHANGE PACKAGE` (when `package` is
    set), then the `ATTRIBUTE` lines.
+
+   **Write artifacts to `~/tmp/henley_output/`, never the repo root.** The swap
+   JSON, the generated `.scr`, and any scratch output go there
+   (`mkdir -p ~/tmp/henley_output` first) — e.g.
+   `henley scr ~/tmp/henley_output/swap.json -o ~/tmp/henley_output/changes.scr`.
+   Keep the working tree clean.
 6. **Apply in Fusion, then reconcile.** The Electronics API is read-only (HANDOFF
    §3), so the user applies the change in Fusion: run the `.scr` (*File > Execute
    Script*) **and** set anything the script doesn't carry — **notably a changed
