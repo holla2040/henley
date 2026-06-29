@@ -46,7 +46,10 @@ Hendley, "the Scrounger", in *The Great Escape*.)
   (look up stock/price by JLC code), and the inventory check —
   `check_stock()`/`format_stock_report()` (classify each part out/low/not_found/
   no_code/ok via one `getComponentDetailByCode` call). `extract_components()`
-  is Fusion-side only (runs inside Fusion 360) — see HANDOFF.md.
+  is Fusion-side only (runs *inside* Fusion 360's embedded Python) and is still a
+  **stub** — the live read is currently done interactively over the HTTP bridge
+  (see "Fusion access from WSL"); wrapping it into a committed extractor is the one
+  open Fusion-side task.
 - `src/henley/__init__.py` — public API exports (`JLCClient`, `JLCError`,
   config helpers).
 - `docs/api-reference.md` — **the API contract** (reverse-engineered from the
@@ -59,9 +62,6 @@ Hendley, "the Scrounger", in *The Great Escape*.)
 
 - `tests/` — `test_auth.py` (signing, pinned to the Java SDK algorithm) and
   `test_fusion.py` (parts-export ingest contract).
-- `HANDOFF.md` — the Fusion-integration work order for Claude running on the
-  `hendrix` Windows box (which is localhost to Fusion and can use the Fusion
-  API MCP server). Read it before touching the Fusion side.
 
 ## The workflow — having a conversation about JLC parts
 
@@ -134,13 +134,19 @@ below — to get its designator and the exact package variant names.) Drive it a
    - `designator` — the schematic ref (e.g. `R6`). Find it in the BOM
      (`henley fusion PARTS.json --no-enrich`, or grep the parts JSON) by matching
      the **old** JLC code; the parts-JSON contract is in `fusion.py`.
-   - `package` — the library **variant name** (leading hyphen, e.g. `-0402`).
-     OMIT for a same-package swap. Read the real variant name off the device
-     (HANDOFF §3) rather than guessing.
-   - `lcsc` / `mpn` / `manufacturer` — the chosen alternate's code, MPN, and maker
-     → the `LCSC` / `MPN` / `MANUFACTURER` attributes. You already have these in
-     the verified record (`code`, `mfr`/`model`), so **fill them in — don't leave
-     `MANUFACTURER` blank when it's in hand**.
+   - `package` — the library **variant name**: the *exact* library name read off
+     the device, which carries a **leading hyphen** (e.g. `-0402`, not `0402` —
+     `CHANGE PACKAGE '0402'` errors). OMIT for a same-package swap. Read the real
+     variant name off the device rather than guessing.
+   - `lcsc` / `mpn` → the `LCSC` / `MPN` attributes. Both are in hand: `lcsc` =
+     the chosen alternate's `code`; `mpn` = its `componentModel` from `detail`
+     (note: jlcsearch's row field literally named `mfr` is the **MPN**, e.g.
+     `0603WAF2202T5E`, NOT the maker name).
+   - `manufacturer` → the `MANUFACTURER` attribute. **The maker name is NOT
+     returned by `getComponentDetailByCode` or jlcsearch** — the API gives only the
+     MPN. Do NOT fabricate it. Get it from the part's LCSC/JLC page (or the MPN's
+     known series), or ask the user. If the swap keeps the same maker, the design's
+     existing `MANUFACTURER` already holds it — set this only when it changes.
    - `attributes` — any extra attrs (e.g. `DESC`).
 
    Then `henley scr swap.json -o changes.scr` (offline). The script carries the
@@ -152,8 +158,9 @@ below — to get its designator and the exact package variant names.) Drive it a
    (`mkdir -p ~/tmp/henley_output` first) — e.g.
    `henley scr ~/tmp/henley_output/swap.json -o ~/tmp/henley_output/changes.scr`.
    Keep the working tree clean.
-6. **Apply in Fusion, then reconcile.** The Electronics API is read-only (HANDOFF
-   §3), so the user applies the change in Fusion: run the `.scr` (*File > Execute
+6. **Apply in Fusion, then reconcile.** The Electronics API is read-only (see
+   "Fusion access from WSL" below), so the user applies the change in Fusion: run
+   the `.scr` (*File > Execute
    Script*) **and** set anything the script doesn't carry — **notably a changed
    schematic VALUE** (e.g. 220 Ω → 330 Ω) — in Fusion as well. Fusion is the write
    side for the whole change; setting the value there is a normal part of applying,
