@@ -1,170 +1,141 @@
-# HANDOFF — Fusion Electronics integration (for Claude on `hendrix`)
+# HANDOFF — Fusion-side work order + verified-facts log
 
-You are Claude Code running on **hendrix** (Windows, `192.168.0.7`), the machine
-where **Autodesk Fusion is running**. This document hands off the Fusion side of
-the **Henley** project. The JLC (JLCPCB) side is already built and verified on a
-Linux box; you can't reach Fusion from there, but you can — Fusion's API is
-local to you.
+This file is **not** a build directive for the CLI — that work (`henley
+alternates`, `scr`, `stock`, and the discover→verify→trade-off workflow) is done
+and documented in `CLAUDE.md` (architecture + the agentic workflow) and
+`README.md` (usage). What remains here is two things the next agent still needs:
 
-## Why this split
+1. **The open Fusion-side work order** — `extract_components()` running *inside*
+   Fusion 360 is still a stub (§1).
+2. **A verified-facts / decisions log** — hard-won facts and reference data that
+   don't live in `CLAUDE.md`/`docs/api-reference.md` (§2–§4).
 
-- The **Fusion API MCP server is localhost-only** — it can only drive a Fusion
-  instance on the same machine. So **only you (on hendrix) can extract data from
-  the running electronics design.** The Linux box has no Fusion and no access.
-- Conversely, the JLC client, signing, CLI, and the parts data-contract are
-  done. Your job is the missing piece: **get the design's parts out of Fusion in
-  the agreed JSON shape**, then let Henley enrich them against JLC.
+Do not re-derive the verified facts below; do not web-search the JLC **API/docs**
+questions (the docs are local — see §2). For the alternate-finding conversation,
+the playbook and the jlcsearch matching rules are in `CLAUDE.md` ("Finding
+alternates in a conversation").
 
-## Mission
+---
 
-From the **active Fusion electronics design**, produce a `henley_parts.json`
-that matches Henley's parts-export contract, then verify it flows through
-`henley fusion`. Bonus: implement `extract_components()` in
-`src/henley/fusion.py` if the API is reachable from Henley's own Python on
-hendrix.
+## 1. OPEN WORK ORDER — Fusion-side `extract_components()` (still a stub)
 
-## Getting the project (already done — sshfs mount)
+The goal that is **not yet built**: enumerate the components in the active Fusion
+Electronics design *from inside Fusion* and emit the parts-export JSON that
+`henley fusion` / `henley stock` consume (the contract is in `fusion.py`).
 
-This project directory is **sshfs-mounted on hendrix**, so you already see the
-live tree at your local mount path (NOT `/home/holla/...` — use wherever it's
-mounted on this Windows box). No clone, push, or copy is needed, and **`.keys`
-is present through the mount**, so enrichment can run right here on hendrix.
+- `src/henley/fusion.py::extract_components()` raises `NotImplementedError` — it
+  must run inside Fusion 360's embedded Python (`adsk.fusion`), i.e. as a Fusion
+  add-in / script, not in this package's interpreter.
+- Today the live read is done **interactively over the HTTP bridge** (§3), not by
+  packaged code. Wrapping that read into a committed Fusion add-in (or a
+  bridge-driven extractor) that produces the parts-export JSON is the remaining
+  integration work. Runs on the `hendrix` Windows box (localhost to Fusion, can
+  use the Fusion API MCP server).
+- Known blocker for a pure-bridge extractor: the bridge's `electronics.Attribute`
+  reader does **not** surface the JLC attributes (`LCSC`/`MPN`/…) — see §3. So a
+  bridge-only path needs another way to read those, or the add-in approach.
 
-Two mount caveats:
-- The checked-in **`.venv/` is Linux binaries** and will not run on Windows.
-  Create a *separate* Windows venv **outside the mount** (e.g.
-  `C:\venvs\henley`) so you don't clobber the Linux one on the shared tree.
-- Writes you make land on the Linux box too (it's the same files). That's the
-  intended data path: write `henley_parts.json` here and it's instantly visible
-  on both machines.
+---
 
-Git remote is set (`origin = git@github.com:holla2040/henley.git`) but the repo
-is **not committed/pushed** — irrelevant given the mount; don't push without the
-user's explicit go-ahead.
+## 2. JLC API — verified facts NOT already in CLAUDE.md / api-reference.md
 
-## The data contract (what you must produce)
+The authoritative docs are **local**: `docs/api-reference.md` (committed,
+verified against the PDFs), the original JLCPCB API **PDFs** in `sdk/docs/*.pdf`,
+and the SDK jars in `sdk/`. Note: `sdk/` (jars **and** `sdk/docs/`) is
+**git-ignored** — local reference only, not in a fresh clone.
 
-Authoritative definition + loader: `src/henley/fusion.py` (`DesignPart`,
-`load_parts_json`). Shape:
+- **No server-side search** (confirmed three ways): SDK request VOs carry only
+  `lastKey`/`pageSize`/`currentPage`; `api-reference.md` bodies are
+  pagination-only; live calls agree. The official API's only discovery role is to
+  **verify** codes (jlcsearch is the discovery surface — see CLAUDE.md).
+- **Catalog-stream throughput (measured)** — relevant only if an exhaustive local
+  cache is ever built: `getComponentInfos` returns **1000 rows/request**, ~0.9
+  req/s sequential → a full catalog (~400–600k parts) is **~400–600 requests,
+  ~7–11 min**. A one-time cache is fine (~500 requests total); per-search full
+  scans are not. `429` ("too many requests") is the only documented rate-limit
+  signal (no numeric limit published) — if caching, be sequential, backoff,
+  resumable. Searches against a local cache cost **zero** API calls.
+- **In-API discovery fallback** (for exhaustive completeness only, not routine
+  "find an alternate"): iterate `getComponentInfos` + filter client-side, then
+  verify. `JLCClient.iter_component_infos()` is wrapped. This means caching the
+  whole catalog — the user **rejected** doing this "for one part"; jlcsearch
+  makes it unnecessary.
+- `getComponentInfos` row shape (the catalog stream, distinct from
+  `getComponentDetailByCode`): `lcscPart`, `firstCategory`/`secondCategory`,
+  `mfrPart`, `manufacturer`, `libraryType` (`base`/`expand`), `description`
+  (specs as text), `price` (encoded `qtyRange:unitPrice,...`), `stock`, `package`.
 
-```json
-{
-  "source": "fusion-electronics",
-  "schemaVersion": 1,
-  "design": "<active document name>",
-  "generatedAt": "<ISO-8601, optional>",
-  "parts": [
-    {
-      "designator": "R1",                       // REQUIRED
-      "manufacturerPart": "RC0402FR-0710KL",    // optional (MPN); alias: "mpn"
-      "jlcCode": "C25744",                       // optional JLC/LCSC code; alias: "lcsc"
-      "value": "10k",                            // optional
-      "package": "0402",                         // optional
-      "quantity": 4,                             // optional, default 1
-      "attributes": { }                          // optional raw Fusion attrs
-    }
-  ]
-}
-```
+---
 
-- Only `designator` is strictly required per part.
-- **`jlcCode` is what JLC enrichment keys on.** Parts without it pass through as
-  `found: false`. Capturing the JLC `Cxxxx` code is the highest-value goal.
+## 3. Fusion Electronics bridge — VERIFIED FACTS
 
-## Step-by-step
+- **Bridge transport:** plain HTTP JSON-RPC at `http://<host>:27182/mcp`. From
+  WSL2 reach it at the **WSL gateway IP** (e.g. `172.17.64.1`, from
+  `ip route | grep default`), NOT `127.0.0.1`, and the Windows portproxy must bind
+  the gateway IP, **never `0.0.0.0`** (0.0.0.0 hijacks loopback and breaks Fusion's
+  server + Claude Desktop). Handshake: `initialize` → (capture `Mcp-Session-Id`
+  header) → `notifications/initialized` → `tools/call`. Tools:
+  `fusion_mcp_electronics_read`, `fusion_mcp_execute` (runs Python), `fusion_mcp_read`,
+  `fusion_mcp_update` (undo/redo). MCP tool schemas are available via ToolSearch
+  (`mcp__fusion__*`).
+- **A modal dialog open in Fusion silently blocks the bridge** — every call
+  returns an empty HTTP body. If reads come back empty, ask the user to close any
+  open Fusion dialog. (Distinct from a clean `{"items":[]}`, which means "query ran,
+  no rows".)
+- **The Electronics API is READ-ONLY.** Verified at the API surface: `adsk.electron`
+  `Part` exposes only `_get_deviceset` (no setter — can't change a footprint); no
+  attribute setter exists; `Schematic` mutators are limited to `deleteEntities` +
+  display props + `beginDesignChange/endDesignChange`. `app.executeTextCommand`
+  reaches Fusion's **core** command window, NOT the EAGLE electronics command line
+  (`GRID`/`UPDATE` → "no command").
+- **`neu_dev.run_text_command("SCRIPT path.scr")`** IS the Python→electronics
+  command bridge, BUT it lives only in the **Electronics text-command Python
+  sandbox** (the "Py" radio in File > View > Show Text Commands), a different
+  interpreter from `fusion_mcp_execute`. Verified: `import neu_dev` in the bridge →
+  `ModuleNotFoundError`; not a file anywhere in ~30k dirs of the Fusion install.
+  **So the bridge can READ the design but cannot WRITE it.** The user applies a
+  generated `.scr` themselves: *File > Execute Script*, or the neu_dev line in Py
+  mode. (`henley scr` generates that script.)
+- **`electronics.Attribute` reader limitation:** the bridge does NOT surface part
+  JLC attributes (`LCSC`/`MPN`/`MANUFACTURER`/`DESC`) via any filter — it returns
+  `{items:[]}`. Those are visible in Fusion's "Attributes of Rn" dialog but not via
+  the reader. `Part`/`Instance`/`Device`/`Package` reads DO work (`Element` is empty
+  when only the schematic, not the board, is open). **This blocks a pure-bridge
+  `extract_components()`** (§1).
+- **Package variant names carry a LEADING HYPHEN.** The comet resistor deviceset's
+  0402 variant is literally `-0402`, not `0402`. `CHANGE PACKAGE '0402' Rn` errors;
+  `CHANGE PACKAGE '-0402' Rn;` works. Always read the real variant names off the
+  device rather than guessing.
 
-1. **Confirm the Fusion API MCP server is connected** to your Claude Code
-   session (check available MCP tools). Confirm Fusion is open with the target
-   electronics design active.
+---
 
-2. **Discover the object model (introspection first — don't guess).** The
-   Electronics Python API is version-dependent and still maturing, so first
-   enumerate what's actually exposed in *this* Fusion:
-   - active `Application` → active `Document` / `Product`; is there an
-     electronics/ECAD design object? schematic? board?
-   - the list of components / devices / parts, and **for one component, dump all
-     its attributes/properties** so we can SEE where the JLC `Cxxxx` code and the
-     MPN are stored (a named attribute? the device name? a supplier/part field?).
-   - Write findings to `docs/fusion-notes.md` so the contract mapping is recorded.
+## 4. Reference data captured (decisions log)
 
-3. **Resolve the open question: where is the JLC code?** (see below). Map the
-   real Fusion field → `jlcCode` / `manufacturerPart` in the contract.
+- `C315567` = **AON7544**, N-channel MOSFET, **DFN-8(3×3)**, 30 V / 30 A /
+  5 mΩ@10 V, Vgs(th) 2.2 V, **Extended** (`expand`), ~$0.117/ea@1, live stock
+  ~252k. The live "find an alternate" target used to validate `henley alternates`.
+- `C2907015` = 22 kΩ 0603 ±1% Extended (FRC0603F2202TS); migrated to
+  `C25768` = 22 kΩ 0402 ±1% **Basic** (0402WGF2202TCE, stock ~610k). The comet
+  22k resistors (R1,R2,R4,R5,R7,R9) were all migrated 0603→0402.
+- Worked substitution example: `C114683` 220 Ω 0603 ±5% Extended → `C25091`
+  (0402WGF2200TCE, Basic, ±1%) — cheaper, far more stock, tighter tolerance, **but**
+  0603→0402 drops power 100 mW → 62.5 mW (75 V → 50 V); 220 Ω across 5 V is
+  ~114 mW, which **exceeds** the 0402 rating. That electrical caveat is exactly the
+  Claude-in-the-loop judgment step — surface it before recommending.
+- Observation: JLC's **Basic library is almost all passives** — a ~170k-part scan
+  found only two Basic N-channel MOSFETs (2N7002, AO3400A), both small SOT-23; a
+  *Basic* 30 A power MOSFET very likely does not exist. (Reminder: Basic/Extended
+  is a fee attribute, **not** a selection criterion — do NOT filter on it.)
+- `docs/comet-0402-migration.md` is a migration-decision worksheet (designators,
+  qty, value, old/new code, MPN/mfr, caveats) — a good template for substitution
+  output.
 
-4. **Extract → write `henley_parts.json`** matching the contract above.
+---
 
-5. **Validate offline (no credentials needed):**
-   ```
-   henley fusion henley_parts.json --no-enrich
-   ```
-   This parses and reports how many parts carry a JLC code. Fix mapping until
-   every populated component shows up correctly.
-
-6. **Enrich against JLC** (needs the JLC permission enabled — see Blocker, and
-   `.keys` present on whichever box runs it):
-   ```
-   henley fusion henley_parts.json
-   ```
-   Emits per-part stock / price tiers / library type (basic vs extended).
-
-7. **(Optional) Implement `extract_components()`** in `src/henley/fusion.py` so
-   Henley can pull from Fusion directly on hendrix (replace the
-   `NotImplementedError`). Keep the same `DesignPart` output. Then a single
-   `henley` command can extract+enrich end to end on hendrix.
-
-## OPEN QUESTION you must resolve with the user / via introspection
-
-Where is the JLCPCB/LCSC `Cxxxx` code stored on each component?
-- a **named attribute** (e.g. `LCSC`, `JLCPCB Part #`) — best case,
-- only the **MPN** — then we need MPN→JLC mapping. ⚠️ The currently-wrapped JLC
-  endpoints look up **by JLC code only** (`getComponentDetailByCode`); there is
-  no MPN search wrapped yet. If parts only have MPNs, flag it — we may need to
-  add/scrape a search path. See `docs/api-reference.md`.
-- encoded in the **device/library name**.
-
-## Blocker (JLC side, account toggle — not code)
-
-JLC enrichment currently returns `403 "API insufficient permissions"`. Signing
-is **proven correct** (valid sig → 403 perms; wrong sig → 401). The user must
-enable the **component API permission** for their OpenAPI app in the JLC console
-(`api.jlcpcb.com`). Until then, `--no-enrich` still fully validates extraction.
-
-## Verified facts (don't re-derive)
-
-- JLC API host: **`https://open.jlcpcb.com`** (`api.jlcpcb.com` is the portal).
-- Auth `JOP`: `Authorization: JOP appid="..",accesskey="..",timestamp="..",nonce="..",signature=".."`,
-  `signature = Base64(HMAC_SHA256(secretKey, "METHOD\nURI\nTS\nNONCE\nPAYLOAD\n"))`.
-- Full API contract: `docs/api-reference.md`. Reference Java SDK jars: `sdk/`.
-
-## Credentials
-
-`.keys` (JLC AppID/Accesskey/SecretKey + RSA tokenization keypair) is **visible
-on hendrix through the sshfs mount**, so you can run the full extract→enrich flow
-locally. It stays git-ignored — never commit it.
-- `config.py` resolves keys via `HENLEY_KEYS` env or a `.keys` discovered by
-  walking up from the cwd (the mounted root has it); endpoint via
-  `HENLEY_ENDPOINT`.
-- Offline `henley fusion … --no-enrich` needs no credentials at all.
-
-## Environment / setup on hendrix
-
-Use a Windows venv **outside the sshfs mount** (the in-tree `.venv/` is Linux):
-
-```
-python -m venv C:\venvs\henley
-C:\venvs\henley\Scripts\activate
-pip install -e ".[dev]"     # run from the mounted project dir; requests + pytest + ruff
-pytest                       # 7 tests should pass (signing + ingest contract)
-```
-
-## Data path between machines
-
-The sshfs mount **is** the shared path — files you write on hendrix appear on the
-Linux box and vice-versa. Just write `henley_parts.json` into the project dir; no
-sockets, git transfer, or copying needed. (FYI: hendrix is `192.168.0.7`; the
-Linux box is Tailscale-only, but you don't need direct networking given the mount.)
-
-## Standing rules (inherited)
+## 5. Standing rules (also in CLAUDE.md)
 
 - Never `git add -A` / `git add .` — stage files individually by path.
-- Never commit or push unless the user explicitly asks.
-- Never hardcode or commit secrets; keep `.keys` out of git.
+- Never commit or push unless the user explicitly asks (each git op is separate).
+- Never hardcode or commit secrets; `.keys` stays git-ignored.
+- Keep dependencies minimal (core install is `requests` only).
+- Update `docs/api-reference.md` alongside any new **JLC endpoint** wrapper.

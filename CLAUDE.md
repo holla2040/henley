@@ -21,7 +21,18 @@ Hendley, "the Scrounger", in *The Great Escape*.)
   read-only component endpoints; `JLCError` and the `{code, success, message,
   data}` envelope unwrap.
 - `src/henley/cli.py` — argparse CLI; entry point `henley = henley.cli:main`.
-  Commands: `ping`, `detail`, `private`, `library`, `fusion`, `stock`, `scr`.
+  Commands: `ping`, `detail`, `private`, `library`, `fusion`, `stock`, `scr`,
+  `alternates`.
+- `src/henley/alternates.py` — alternate-part discovery: `fetch_candidates()`
+  (DISCOVER candidate codes from the third-party parametric index
+  `jlcsearch.tscircuit.com` — the official API can't search), `discover_and_verify()`
+  (VERIFY *every* hit in one batched `getComponentDetailByCode` call — jlcsearch
+  stock is a stale snapshot), and `format_alternates_report()` (the trade-off
+  table). It deliberately does **not** rank or pick (no stock/price sort, no
+  Basic filter) — Claude/the user weighs the verified data. jlcsearch matches
+  `package` (and other string filters) by **exact equality, no wildcards**; the
+  fuzzy escape hatch is `--category components -p search=…` (FTS). `CATEGORIES`
+  holds the 44 jlcsearch category slugs.
 - `src/henley/scr.py` — Fusion `.scr` migration-script generator: `PartSwap`,
   `load_swaps_json()`, `render_script()`. Turns a list of part swaps (designator
   + package variant + attributes) into the EAGLE command-line script the user
@@ -51,6 +62,121 @@ Hendley, "the Scrounger", in *The Great Escape*.)
 - `HANDOFF.md` — the Fusion-integration work order for Claude running on the
   `hendrix` Windows box (which is localhost to Fusion and can use the Fusion
   API MCP server). Read it before touching the Fusion side.
+
+## The workflow — having a conversation about JLC parts
+
+The point of Henley: the user runs Claude in this repo, says something in plain
+words about a JLC part, and you have the conversation — **you are the interpreter
+of their words into the existing tooling.** Three standing rules for that role:
+
+- **Everything you need to drive the tools is documented** — this file, the
+  `README`, and the module docstrings named below. **Do not read the source to
+  figure out how to use a tool.** If something genuinely isn't documented, say so;
+  don't reverse-engineer it from the code.
+- **Never modify Henley's source to satisfy a request.** You translate the user's
+  intent into calls to the tools *as they are*. If a request needs a capability a
+  tool doesn't have, tell the user — don't add it.
+- **Running the CLI:** prefer `henley` if it's on PATH. On a fresh checkout where
+  `pip install -e .` didn't land it on PATH (or the venv isn't active), run it as
+  a module from the repo root — `PYTHONPATH=src python -m henley.cli <cmd>` (or
+  `python -m henley <cmd>`), which needs only `requests`. Every `henley <cmd>`
+  below works identically that way.
+
+Many conversations are a one-shot lookup — *"is C25768 in stock?"* → `henley
+detail`; *"check this BOM before I order"* → `henley stock`. The main multi-step
+job is **changing a part**, and there is **one** workflow for it; the only thing
+that varies is *why* the part changes — it's **out of stock**, or you want a
+**different package**, or a **different value**. (If the part lives in a Fusion
+design, first read the live design over the bridge — see "Fusion access from WSL"
+below — to get its designator and the exact package variant names.) Drive it as:
+
+1. **Anchor on the target.** `henley detail <code>` → read its category, exact
+   `componentSpecification` (the package string), and key specs. The exact
+   package string is what you pass as `--package` (see matching rules below).
+   `detail` **already prints JSON** — there is **no `--json` flag**; don't pass one
+   (it errors). Only `stock` and `alternates` take `--json` (see "CLI output" below).
+2. **Translate the spoken constraint into flags** — *you* own the hard filter; it
+   is NOT hardcoded. "same package" → `--package "<exact spec>"`; a category →
+   `--category <slug>` (`henley alternates --list-categories`); other constraints
+   → `-p key=value`. Then run `henley alternates <code> --category … [--package …]
+   [-p …] --json`. The tool discovers candidates from jlcsearch and **verifies
+   every one live** (stock/price/parameters) — it does the gather, not the pick.
+3. **Apply any value/numeric hard filter yourself, over the verified `--json`.**
+   Most categories have **no** jlcsearch query param for the spec you care about
+   (e.g. `resistor_arrays` has no resistance param), and the `_min`/`_max` params
+   are unreliable — so don't try to push it into the query. Instead filter the
+   `candidates[]` on each part's verified `parameters[]` (the authoritative live
+   specs). The recipe (here, keep only 330 Ω parts) — use it, don't re-invent it:
+
+   ```bash
+   henley alternates C29719 --category resistor_arrays --package "0603x4" --json \
+   | python3 -c 'import json,sys
+   d=json.load(sys.stdin)
+   def spec(c,name):
+       return next((p["parameterValue"] for p in (c["parameters"] or [])
+                    if p["parameterName"]==name), None)
+   for c in d["candidates"]:
+       if c["verified"] and (spec(c,"Resistance") or "").startswith("330"):
+           print(c["code"], c["liveStock"], c["unitPrice1"], spec(c,"Resistance"))'
+   ```
+4. **Trade off and recommend (this is your job, not the tool's).** Weigh the
+   *verified* data. User's bias: **high inventory = popular = supply-chain-safe,
+   and they'll pay a bit more for it** — the opposite of "cheapest". **Same
+   package is the top priority** (changing it changes the PCB layout); a different
+   package can still win if the inventory/price payoff justifies a re-layout.
+   Always **surface electrical caveats** — e.g. downsizing 0603→0402 drops the
+   power/voltage rating, so check the part's actual dissipation first. Recommend
+   one with reasoning the user can override.
+5. **Build the swap and generate the `.scr`.** Do NOT read `scr.py` source for the
+   input format — the swap-JSON contract is documented in **README → "The
+   workflow" (the `.scr` file format)** and the `henley.scr` module docstring.
+   Fields (only `designator` required), filled from data you already have:
+   - `designator` — the schematic ref (e.g. `R6`). Find it in the BOM
+     (`henley fusion PARTS.json --no-enrich`, or grep the parts JSON) by matching
+     the **old** JLC code; the parts-JSON contract is in `fusion.py`.
+   - `package` — the library **variant name** (leading hyphen, e.g. `-0402`).
+     OMIT for a same-package swap. Read the real variant name off the device
+     (HANDOFF §3) rather than guessing.
+   - `lcsc` / `mpn` / `manufacturer` — the chosen alternate's code, MPN, and maker
+     → the `LCSC` / `MPN` / `MANUFACTURER` attributes. You already have these in
+     the verified record (`code`, `mfr`/`model`), so **fill them in — don't leave
+     `MANUFACTURER` blank when it's in hand**.
+   - `attributes` — any extra attrs (e.g. `DESC`).
+
+   Then `henley scr swap.json -o changes.scr` (offline). The script carries the
+   **package variant and the attributes** — `CHANGE PACKAGE` (when `package` is
+   set), then the `ATTRIBUTE` lines.
+6. **Apply in Fusion, then reconcile.** The Electronics API is read-only (HANDOFF
+   §3), so the user applies the change in Fusion: run the `.scr` (*File > Execute
+   Script*) **and** set anything the script doesn't carry — **notably a changed
+   schematic VALUE** (e.g. 220 Ω → 330 Ω) — in Fusion as well. Fusion is the write
+   side for the whole change; setting the value there is a normal part of applying,
+   just like running the script (so tell the user to set it — do NOT hand-edit the
+   `.scr` to fake it). Then update the BOM record (the parts JSON) so the
+   designator points to the new code and a later `henley stock` reflects reality.
+
+**jlcsearch matching rules (so your flags actually match):**
+- `package` and other per-category **string** filters are **exact, case-
+  sensitive, no wildcards** (`DFN-8` ≠ `DFN-8(3x3)`; `%`/`*`/substrings → 0 rows).
+  Use the target's exact `componentSpecification`.
+- Numeric `_min`/`_max` params are **unreliable** (sparse columns silently drop
+  null rows). Apply numeric/spec filters yourself over the verified
+  `parameters[]`, not via jlcsearch query params.
+- Fuzzy / cross-package discovery: `--category components -p search="<tokens>"`
+  (FTS, token + prefix; in-stock parts only).
+
+**Do NOT** filter or rank on Basic vs. Extended — it's a fee attribute, not a
+selection criterion (display it, don't select on it). **Do NOT** download the
+whole catalog "for one part" — jlcsearch is the discovery surface.
+
+**CLI output (so you don't guess a flag that doesn't exist):**
+- `detail`, `private`, `library`, `fusion` — **print JSON by default; no `--json`
+  flag** (passing `--json` errors). Pipe their stdout to `python3`/`jq` to parse.
+- `stock`, `alternates` — print a **human report by default**; add **`--json`**
+  for structured output. These are the *only* two commands that accept `--json`.
+- `ping` — prints a status line. `scr` — prints the `.scr` (or `-o FILE` to write).
+- Each command's flags are exactly those in `henley <cmd> --help`; don't assume a
+  flag exists because another command has it.
 
 ## Auth scheme (`JOP`)
 
@@ -108,6 +234,12 @@ henley ping                 # verify credentials + signing
 pytest                      # tests live in tests/ (run once present)
 ruff check .                # line-length 100, target py310
 ```
+
+**If the `henley` command isn't found** (venv not activated, or `pip install -e .`
+didn't land the script on PATH — happens on fresh boxes / old pip-setuptools),
+run it without installing, from the repo root:
+`PYTHONPATH=src python -m henley.cli <cmd>` (or `python -m henley <cmd>`). Tests
+likewise: `PYTHONPATH=src python -m pytest -q`.
 
 The `.keys` RSA "Tokenization Key" block (for order-placement field encryption)
 is currently **unused** — `config.py` does not parse it and no code consumes it.

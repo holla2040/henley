@@ -103,6 +103,37 @@ def _cmd_stock(client: JLCClient, args) -> int:
     return 1 if any(r["status"] in STOCK_BLOCKERS for r in rows) else 0
 
 
+def _cmd_alternates(client: JLCClient, args) -> int:
+    """Discover alternate parts (jlcsearch) and verify them against the live JLC API."""
+    from .alternates import (
+        CATEGORIES,
+        discover_and_verify,
+        format_alternates_report,
+        parse_param_args,
+    )
+
+    if args.list_categories:
+        print("\n".join(CATEGORIES))
+        return 0
+    if not args.code:
+        print("error: a target component code is required (e.g. C315567)", file=sys.stderr)
+        return 1
+    if not args.category:
+        print("error: --category is required (see --list-categories)", file=sys.stderr)
+        return 1
+
+    params = parse_param_args(args.param or [])
+    if args.package:
+        params.setdefault("package", args.package)
+
+    result = discover_and_verify(args.code, args.category, params, client)
+    if args.json:
+        _print(result)
+    else:
+        print(format_alternates_report(result, top=(args.top or None)))
+    return 0
+
+
 def _cmd_scr(client, args) -> int:
     """Generate a Fusion ``.scr`` migration script from one or more swap files."""
     from pathlib import Path
@@ -165,6 +196,26 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--json", action="store_true", help="Emit structured JSON instead of a report.")
     sp.set_defaults(func=_cmd_stock)
 
+    sp = sub.add_parser(
+        "alternates",
+        help="Discover alternate parts (jlcsearch) and verify them against the live JLC API.",
+    )
+    sp.add_argument("code", nargs="?", help="Target JLC component code to replace, e.g. C315567.")
+    sp.add_argument("--category",
+                    help="jlcsearch category slug (see --list-categories), e.g. mosfets.")
+    sp.add_argument("--package",
+                    help="Package filter (must match jlcsearch's exact string, e.g. 'DFN-8(3x3)').")
+    sp.add_argument("-p", "--param", action="append", metavar="KEY=VALUE",
+                    help="Extra jlcsearch query param (repeatable), e.g. -p resistance=220. "
+                         "Numeric _min/_max params are unreliable (sparse columns) — prefer "
+                         "filtering on the verified parameters yourself.")
+    sp.add_argument("--top", type=int, default=20,
+                    help="Max candidates to show in the report, in index order (0 = all).")
+    sp.add_argument("--json", action="store_true", help="Emit the full structured result as JSON.")
+    sp.add_argument("--list-categories", action="store_true",
+                    help="List jlcsearch category slugs and exit.")
+    sp.set_defaults(func=_cmd_alternates)
+
     sp = sub.add_parser("scr", help="Generate a Fusion .scr migration script from swap files.")
     sp.add_argument("swaps_json", nargs="+",
                     help="One or more swap JSON files; merged into one combo script.")
@@ -181,8 +232,10 @@ def main(argv: list[str] | None = None) -> int:
 
     # Offline modes need no credentials: `scr` is pure generation; `fusion --no-enrich`
     # only parses.
-    offline = args.command == "scr" or (
-        args.command == "fusion" and getattr(args, "no_enrich", False)
+    offline = (
+        args.command == "scr"
+        or (args.command == "fusion" and getattr(args, "no_enrich", False))
+        or (args.command == "alternates" and getattr(args, "list_categories", False))
     )
     needs_client = not offline
     try:

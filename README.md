@@ -37,33 +37,41 @@ equivalent **0402** part that:
 - ideally is a Basic/preferred assembly part to keep PCBA cost down.
 
 Doing that by hand — one web search per part — is exactly the tedium Henley is
-meant to remove. You point Henley at the design, and it goes and finds the
-matching, in-stock parts for you.
+meant to remove. That is what `henley alternates` does **today**: give it a part
+and a constraint ("same package", "at least 40 A") and it discovers candidate
+replacements, verifies each one's **live** JLC stock / price / specs, and lays
+out the trade-off so you can pick. See
+[Finding a replacement part](#finding-a-replacement-part).
 
-**Where this is heading.** Today the Fusion Electronics API is read-only, so
-Henley reads the design, looks up each part, and reports what it found. Once
-Fusion Electronics gains **write** capability, Henley will close the loop: for
-each 0603 part, query JLC for the equivalent 0402 part that has stock and
-matching specs, then **write the new JLC part number straight back into the
-schematic** at the new package size — turning a whole-board package migration
-from a day of manual searching into a single query. That is the point of all
-this: validate availability and source equivalents automatically, so JLCPCB
-**PCBA** orders go out faster and with fewer surprises.
+**Where this is heading.** The Fusion Electronics API is read-only, so today
+Henley reads the design and looks up each part, you pick the replacements, and it
+generates a Fusion `.scr` script you run to apply the package + part-number
+changes ([The `.scr` file format](#the-scr-file-format)).
+Once Fusion Electronics gains **write** capability, Henley will close the loop
+automatically — writing the new JLC part number straight back into the schematic
+at the new package size, turning a whole-board package migration from a day of
+manual searching into a single query. The point of all this: validate
+availability and source equivalents automatically, so JLCPCB **PCBA** orders go
+out faster and with fewer surprises.
 
 ## What it does today
 
 Read-only component (parts inventory) endpoints, signed with JLCPCB's `JOP`
 authentication scheme, exposed through a `henley` CLI and a small Python API:
 
+- **Find an alternate part** (`henley alternates`) — discover candidate
+  replacements from a parametric index and verify each one **live** against JLC
+  for stock, price, and specs, then weigh the trade-off and choose. See
+  [Finding a replacement part](#finding-a-replacement-part).
+- **Inventory check** a BOM (`henley stock`) — flag out-of-stock / problem parts
+  before a board submission.
+- Generate Fusion Electronics migration scripts (`.scr`) to batch part package
+  and attribute changes — see
+  [The `.scr` file format](#the-scr-file-format).
 - Look up full component detail (price tiers, stock, parameters, datasheet).
 - Browse the assembly component library.
 - List your private / consigned JLC inventory.
-- **Inventory check** a BOM — flag out-of-stock / problem parts before a board
-  submission (`henley stock`).
 - Verify that your credentials and request signing are working.
-- Generate Fusion Electronics migration scripts (`.scr`) to batch part package
-  and attribute changes — see
-  [Writing changes back](#writing-changes-back-generating-scr-migration-scripts).
 
 ## Install
 
@@ -82,6 +90,17 @@ Optional extras:
 ```bash
 pip install -e ".[dev]"       # pytest, ruff
 ```
+
+> **If `henley` isn't found after install** — usually the virtualenv isn't
+> activated, or `pip install -e .` put the script somewhere off your `PATH`. You
+> don't need the installed command: run it as a module from the repo root, which
+> only needs `requests`:
+>
+> ```bash
+> PYTHONPATH=src python -m henley.cli ping     # or: python -m henley ping
+> ```
+>
+> Every `henley <cmd>` example in this README works the same way via that form.
 
 ### Set your JLC API keys (required)
 
@@ -130,6 +149,20 @@ henley ping
 - **Signature rejected** — check the `AppID` / `Accesskey` / `SecretKey` in
   `.keys`.
 
+3. **Find an alternate for a part.** Pick the category (`--list-categories`) and
+   the constraint, then let Henley discover + verify candidates:
+
+```bash
+henley alternates --list-categories                  # the category slugs (offline)
+henley detail C315567                                 # get the part's exact package string
+henley alternates C315567 --category mosfets --package "DFN-8(3x3)" --top 10
+```
+
+   Henley prints the target, then candidates with their **live** stock, price,
+   and specs — it does not pick for you. Pass `--json` to get the full data (e.g.
+   to hand to Claude for the trade-off). Full details, including the fuzzy
+   `search` path, are in [Finding a replacement part](#finding-a-replacement-part).
+
 ## CLI command reference
 
 ```
@@ -144,9 +177,18 @@ henley [--keys PATH] <command> [options]
 | `henley library [--limit N]` | Browse the assembly component library. |
 | `henley fusion PARTS.json [--no-enrich]` | Ingest a Fusion parts-export JSON and enrich each part against JLC (stock, price tiers, basic/extended). `--no-enrich` validates the file offline without calling the API. |
 | `henley stock PARTS.json [--min-stock N] [--json]` | **Inventory check** — look up live stock for every part in a BOM and flag any that are out of stock, not found, or below `--min-stock`. Exits nonzero if any part is out-of-stock or not found, so it can gate a submission (`henley stock bom.json && submit`). |
-| `henley scr SWAPS.json [SWAPS2.json ...] [-o FILE.scr] [--design NAME]` | Generate a Fusion `.scr` migration script from one or more swap files (merged into one combo script). Emits the `CHANGE PACKAGE` + `ATTRIBUTE` commands you run in Fusion. Runs offline — no credentials needed. See [Writing changes back](#writing-changes-back-generating-scr-migration-scripts). |
+| `henley scr SWAPS.json [SWAPS2.json ...] [-o FILE.scr] [--design NAME]` | Generate a Fusion `.scr` migration script from one or more swap files (merged into one combo script). Emits the `CHANGE PACKAGE` + `ATTRIBUTE` commands you run in Fusion. Runs offline — no credentials needed. See [The `.scr` file format](#the-scr-file-format). |
+| `henley alternates CODE --category SLUG [--package PKG] [-p KEY=VALUE ...] [--top N] [--json]` | **Find an alternate** for a part: DISCOVER candidates from the third-party parametric index `jlcsearch.tscircuit.com`, then VERIFY *every* hit against the live JLC API (stock, price, parameters) and print a trade-off table. It does **not** rank or pick — you (or Claude) weigh stock / price / spec margin / package. `--list-categories` lists the slugs (offline). See [Finding a replacement part](#finding-a-replacement-part). |
 
 `--keys PATH` overrides credential discovery for any command.
+
+**Output format.** `detail`, `private`, `library`, and `fusion` print **JSON** to
+stdout by default — they have **no `--json` flag** (passing one is an error); pipe
+them to `jq`/`python3` to parse. Only **`stock`** and **`alternates`** accept
+`--json`; without it they print a human-readable report. `ping` prints a status
+line; `scr` prints (or writes with `-o`) the `.scr` script. A command's flags are
+exactly what `henley <cmd> --help` lists — don't assume a flag exists because
+another command has it.
 
 ## Python usage
 
@@ -288,65 +330,113 @@ Remove the (correct) gateway forward when you're done with:
 netsh interface portproxy delete v4tov4 listenaddress=172.17.64.1 listenport=27182
 ```
 
-## Migration workflow (driven in Claude Code)
+## The workflow
 
-Henley's two halves — **reading** a live design over the Fusion bridge and
-**generating** a `.scr` to change parts — are glued together by an interactive
-[Claude Code](https://claude.com/claude-code) session run from this repo. Claude
-drives the bridge reads and the JLC lookups; **you** make the design decisions
-and run the final script in Fusion. This is the start-to-finish loop.
+There is **one** workflow. A part needs to change — it's **out of stock**, you
+want a **different package**, or a **different value** — and the path is the same
+each time; only the trigger differs. It runs as an interactive
+[Claude Code](https://claude.com/claude-code) session in this repo: Claude reads
+the live design and does the JLC lookups, **you** make the design decision, and
+**Fusion** is where the change is written (the Electronics API is read-only, so
+Henley can't edit the schematic for you). `comet` below is just an example design.
 
 **Before you start**
 
 1. Fusion is running with an **Electronics document open** and the **MCP Server
    enabled** (see [Reading from Fusion Electronics](#reading-from-fusion-electronics-no-mcp-client-required)).
-2. If you run under WSL2, the port forward is up (same section,
+2. Under WSL2, the port forward is up (same section,
    [networking note](#reaching-it-from-wsl2-networking-note)).
-3. Your `.keys` file is in place and `pip install -e .` is done.
-4. **No modal dialog is open in Fusion.** An open dialog (e.g. the *Attributes
-   of Rn* editor) silently blocks the bridge — every read comes back empty.
+3. Your `.keys` file is in place (or use the `PYTHONPATH=src` fallback above).
+4. **No modal dialog is open in Fusion** — an open dialog (e.g. *Attributes of
+   Rn*) silently blocks the bridge, so every read comes back empty.
 
 **The loop**
 
-1. Open the design in Fusion. Start Claude Code in the `henley` repo directory.
-2. **Ask Claude to read the live design** — e.g. *"read the comet design and list
-   the resistors with their values and package variants."* Claude `POST`s to the
-   Fusion endpoint and reports designators, values, and the **exact package
-   variant names** available on each deviceset (these are literal library names —
-   often with a leading hyphen, like `-0402`, not `0402`).
-3. **Decide the swaps with Claude.** Claude can look up candidate JLC
-   replacements (`henley detail Cxxxx`), check stock and Basic-vs-Extended, and
-   record the result as a worksheet (see
-   [`docs/comet-0402-migration.md`](docs/comet-0402-migration.md) for the shape).
-4. **Claude writes a `swaps.json` and runs the generator** —
-   `henley scr swaps.json -o migration.scr` (see [Writing changes back](#writing-changes-back-generating-scr-migration-scripts)
-   for the file format and a worked example).
-5. **You run `migration.scr` in Fusion** — *File > Execute Script*, or the
-   `neu_dev.run_text_command("SCRIPT …")` line in the text-command Py mode.
-6. **Ask Claude to re-read the design and verify** each part landed on the new
-   variant and attributes.
-7. **Save in Fusion** once you're happy.
+1. **Read the live design.** Ask Claude — e.g. *"read the comet design and list
+   the resistors with their values and package variants."* Claude reports
+   designators, values, and the **exact package variant names** on each deviceset
+   (literal library names, often with a leading hyphen — `-0402`, not `0402`).
+2. **Find a replacement** for the part that needs changing — Claude discovers
+   candidates and verifies them live (`henley alternates`, with `henley detail` to
+   anchor on the original). See [Finding a replacement part](#finding-a-replacement-part).
+3. **Decide the swap** with Claude — weigh inventory / price / spec margin /
+   package; Claude surfaces electrical caveats (e.g. a 0603→0402 shrink lowers the
+   power rating). The decision is yours.
+4. **Generate the `.scr`.** Claude writes a `swaps.json` and runs
+   `henley scr swaps.json -o changes.scr`. The script carries the **package
+   variant and the attributes** (`LCSC`/`MPN`/`MANUFACTURER`/…). See
+   [The `.scr` file format](#the-scr-file-format).
+5. **Apply it in Fusion.** Run the script — *File > Execute Script*, or the
+   `neu_dev.run_text_command("SCRIPT …")` line in the text-command Py mode. Then
+   set anything the script doesn't carry — **notably a changed schematic value**
+   (e.g. 220 Ω → 330 Ω) — in Fusion as well; Fusion is the write side for the
+   whole change.
+6. **Verify** — ask Claude to re-read the design and confirm each part landed on
+   the new package, attributes, and value.
+7. **Reconcile** — update your BOM record (the parts JSON) so it points at the new
+   code; a later `henley stock` then reflects reality. Save in Fusion.
 
-**Gotchas worth knowing up front**
+**Gotchas**
 
-- Close any modal dialog in Fusion before asking Claude to read — an open dialog
-  makes the bridge return empty responses.
-- The Fusion Electronics API is **read-only**; Claude cannot apply changes for
-  you. The `.scr` is yours to run (step 5) — that's the only write path.
+- Close any modal dialog in Fusion before a read — an open dialog returns empty.
+- The Fusion Electronics API is **read-only**; Claude can't apply changes for you.
+  Applying them in Fusion (step 5) is the only write path.
 - A `.scr` **stops at the first failing command**, which can leave a partial
-  migration. Verify variant names before a large batch and keep the run undoable.
+  change — sanity-check variant names before a big batch, and keep the run undoable.
 
-## Writing changes back: generating `.scr` migration scripts
+`docs/comet-0402-migration.md` is one worked example of this workflow (a batch of
+resistors moved 0603 → 0402) — a useful template for the decision worksheet.
 
-The Fusion Electronics **API is read-only** — neither the live bridge above nor
-Fusion's add-in Python can change a part's package or write its attributes (the
-electronics objects expose getters, no setters). The one channel that *can* edit
-a design is the EAGLE-heritage **command line**, driven by a `.scr` script.
+### Finding a replacement part
 
-So Henley does the half it can: it **generates the `.scr`** from a table of
-swaps; **you run it** in Fusion. This is ideal for batch edits — migrating dozens
-or hundreds of resistors to a new package, repointing parts to new JLC codes —
-without clicking each part by hand.
+The official JLCPCB API **cannot search** — it only verifies codes you already
+hold (`getComponentDetailByCode`). So `henley alternates` finds replacements in
+two steps:
+
+1. **Discover** candidate codes from `jlcsearch.tscircuit.com`, a third-party
+   parametric index of the whole JLC catalog (one HTTP query, no catalog download).
+2. **Verify** *every* returned code against the live JLC API in one batched call,
+   for authoritative stock / price / parameters. jlcsearch's stock is a **stale
+   cached snapshot** (seen off by 30–600× in both directions), so the table is
+   built on the live numbers, not jlcsearch's.
+
+It deliberately **does not rank or pick** — it gathers and verifies; you (or
+Claude) weigh inventory vs. price vs. spec margin vs. package.
+
+```bash
+henley alternates --list-categories                 # the jlcsearch category slugs
+# same-package alternates for a 30 A DFN-8 MOSFET:
+henley alternates C315567 --category mosfets --package "DFN-8(3x3)" --top 10
+henley alternates C315567 --category mosfets --package "DFN-8(3x3)" --json   # full data
+```
+
+**The spoken filter becomes flags.** "Same package, at least 40 A" → Claude picks
+the category and translates the constraint into `--package` / `-p key=value` query
+params. A value/numeric hard filter (e.g. "330 Ω") is best applied by reading the
+**verified `parameters[]`** in the `--json`, not via jlcsearch query params — see
+the matching notes below.
+
+**How jlcsearch matches (verified against its source):**
+
+- `package` (and the other per-category string filters) match by **exact,
+  case-sensitive equality — no wildcards**. `DFN-8` ≠ `DFN-8(3x3)`; `%`, `*`, and
+  substrings all return nothing. Use the target's exact `componentSpecification`
+  (from `henley detail`) as `--package`.
+- Numeric `_min` / `_max` params (e.g. `continuous_drain_current_min`) are
+  **unreliable** — jlcsearch's structured numeric columns are sparsely populated
+  (a `_min` filter silently drops every row whose value is null). Passive value
+  fields (`resistance`, `capacitance`) are dense and safe.
+- The **fuzzy / cross-package escape hatch** is the generic `components` category
+  with a full-text `search`: `henley alternates C315567 --category components -p
+  search="AON75"` (token + prefix matching; surfaces the same MPN across package
+  spellings; in-stock parts only).
+
+### The `.scr` file format
+
+`henley scr` turns a table of swaps into the `.scr` you run in Fusion (loop step
+5) — the write channel for package and attribute changes, ideal for batch edits
+(migrating dozens of resistors to a new package, repointing parts to new JLC
+codes) without clicking each part by hand.
 
 Describe the changes in a swap JSON file (object with a `swaps` list, or a bare
 list). Only `designator` is required per swap:
@@ -378,13 +468,13 @@ Generate the script (offline — no credentials needed). Multiple swap files mer
 into one combo script you execute once:
 
 ```bash
-henley scr swaps.json -o henley.scr
-henley scr 22k.json 10k.json 220r.json -o migration.scr   # combo
+henley scr swaps.json -o changes.scr
+henley scr 22k.json 10k.json 220r.json -o changes.scr   # combo
 ```
 
-Each swap renders as the command block `CHANGE PACKAGE` **before** the
-`ATTRIBUTE` lines (switching the variant can reset variant-default attributes, so
-the values are written afterward):
+Each swap renders as `CHANGE PACKAGE` **before** the `ATTRIBUTE` lines (switching
+the variant can reset variant-default attributes, so the values are written
+afterward):
 
 ```
 CHANGE PACKAGE '-0402' R1;
@@ -394,16 +484,10 @@ ATTRIBUTE R1 MPN '0402WGF2202TCE';
 ATTRIBUTE R1 DESC '1%';
 ```
 
-Then run it in Fusion (Electronics workspace active), either way:
-
-- **File > Execute Script**, and pick `henley.scr`; or
-- the text command line in **Python (`Py`)** mode (File > View > Show Text
-  Commands): `import neu_dev; neu_dev.run_text_command("SCRIPT C:\\path\\henley.scr")`.
-
-> ⚠️ A `.scr` runs as a sequence of commands and will stop at the first one that
-> fails (e.g. a variant name that doesn't exist on that part), which can leave a
-> **partial** migration. Sanity-check variant names against the design before
-> running a large batch, and keep the run undoable.
+The script covers **package and attributes**. A changed **schematic value** (e.g.
+220 Ω → 330 Ω) is not part of the `.scr` — it's set in Fusion when you apply the
+change (loop step 5). You run the generated script in Fusion as described in the
+loop.
 
 ## Security
 
