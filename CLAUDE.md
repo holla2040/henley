@@ -172,8 +172,18 @@ below — to get its designator and the exact package variant names.) Drive it a
   (FTS, token + prefix; in-stock parts only).
 
 **Do NOT** filter or rank on Basic vs. Extended — it's a fee attribute, not a
-selection criterion (display it, don't select on it). **Do NOT** download the
-whole catalog "for one part" — jlcsearch is the discovery surface.
+selection criterion (display it, don't select on it). That fee is the JLCPCB PCBA
+**feeder/loading charge**, per *unique* part type and one-time per order (NOT per
+unit): **Economic** tier ≈ **$3** per Extended part (Basic free); **Standard**
+tier ≈ **$1.50** per part type for *both* Basic and Extended — so "Basic is
+cheaper" really only holds on Economic, and the impact scales with BOM diversity
+and amortizes over board count. The *unit-price* gap between a Basic and Extended
+equivalent is negligible (often Extended is even cheaper per unit). The fee is
+**not** returned by the component API (it's order-level) — which is exactly why
+you surface Basic/Extended for the user's judgment rather than select on it.
+(Source: jlcpcb.com/help/article/pcb-assembly-price — a policy figure that
+changes; verify if it matters.) **Do NOT** download the whole catalog "for one
+part" — jlcsearch is the discovery surface.
 
 **CLI output (so you don't guess a flag that doesn't exist):**
 - `detail`, `private`, `library`, `fusion` — **print JSON by default; no `--json`
