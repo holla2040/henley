@@ -43,14 +43,17 @@ replacements, verifies each one's **live** JLC stock / price / specs, and lays
 out the trade-off so you can pick. See
 [Finding a replacement part](#finding-a-replacement-part).
 
-**Where this is heading.** The Fusion Electronics API is read-only, so today
-Henley reads the design and looks up each part, you pick the replacements, and it
-generates a Fusion `.scr` script you run to apply the package + part-number
-changes ([The `.scr` file format](#the-scr-file-format)).
-Once Fusion Electronics gains **write** capability, Henley will close the loop
-automatically — writing the new JLC part number straight back into the schematic
-at the new package size, turning a whole-board package migration from a day of
-manual searching into a single query. The point of all this: validate
+**Where this is heading.** Henley reads the design and looks up each part, you
+pick the replacements, and it generates a Fusion `.scr` script that applies the
+package + part-number changes ([The `.scr` file format](#the-scr-file-format)).
+The Fusion Electronics *object* API is read-only — **but the EAGLE command line
+is reachable from Python/MCP** via
+`executeTextCommand('Electron.run "script C:\\path\\changes.scr"')`, so Henley can
+fire the `.scr` straight into the running schematic over the bridge (no manual
+*Execute Script* step). That closes the loop: writing the new JLC part number
+back into the schematic at the new package size, turning a whole-board package
+migration from a day of manual searching into a single query. The point of all
+this: validate
 availability and source equivalents automatically, so JLCPCB **PCBA** orders go
 out faster and with fewer surprises.
 
@@ -337,8 +340,9 @@ want a **different package**, or a **different value** — and the path is the s
 each time; only the trigger differs. It runs as an interactive
 [Claude Code](https://claude.com/claude-code) session in this repo: Claude reads
 the live design and does the JLC lookups, **you** make the design decision, and
-**Fusion** is where the change is written (the Electronics API is read-only, so
-Henley can't edit the schematic for you). `comet` below is just an example design.
+**Fusion** is where the change is written (the Electronics *object* API is
+read-only, but the `.scr` can be applied either manually or fired over the bridge
+with `Electron.run` — see step 5). `comet` below is just an example design.
 
 **Before you start**
 
@@ -366,11 +370,19 @@ Henley can't edit the schematic for you). `comet` below is just an example desig
    `henley scr swaps.json -o changes.scr`. The script carries the **package
    variant and the attributes** (`LCSC`/`MPN`/`MANUFACTURER`/…). See
    [The `.scr` file format](#the-scr-file-format).
-5. **Apply it in Fusion.** Run the script — *File > Execute Script*, or the
-   `neu_dev.run_text_command("SCRIPT …")` line in the text-command Py mode. Then
-   set anything the script doesn't carry — **notably a changed schematic value**
-   (e.g. 220 Ω → 330 Ω) — in Fusion as well; Fusion is the write side for the
-   whole change.
+5. **Apply it in Fusion.** Two ways:
+   - **Manual** — *File > Execute Script* (or the
+     `neu_dev.run_text_command("SCRIPT …")` line in the text-command Py mode), then
+     set anything the script doesn't carry — **notably a changed schematic value**
+     (e.g. 220 Ω → 330 Ω) — in Fusion as well.
+   - **Over the bridge** — have Claude fire it with
+     `executeTextCommand('Electron.run "script C:\\tmp\\changes.scr"')` via the MCP
+     `fusion_mcp_execute` tool. The same channel sets the value
+     (`Electron.run "VALUE R6 330"`), so the whole change is one scripted stream.
+     `Electron.run` returns nothing, so Claude verifies by re-reading; changes are
+     **unsaved** until you save in Fusion. (Details:
+     [Reading from Fusion Electronics](#reading-from-fusion-electronics-no-mcp-client-required)
+     and `docs/fusion-notes.md` → "The WRITE path".)
 6. **Verify** — ask Claude to re-read the design and confirm each part landed on
    the new package, attributes, and value.
 7. **Reconcile** — update your BOM record (the parts JSON) so it points at the new
@@ -379,8 +391,11 @@ Henley can't edit the schematic for you). `comet` below is just an example desig
 **Gotchas**
 
 - Close any modal dialog in Fusion before a read — an open dialog returns empty.
-- The Fusion Electronics API is **read-only**; Claude can't apply changes for you.
-  Applying them in Fusion (step 5) is the only write path.
+- The Fusion Electronics **object** API is read-only, but the EAGLE command line
+  is reachable via `Electron.run` (step 5) — so Claude *can* apply the `.scr` over
+  the bridge, or you run it manually. A **bare** `executeTextCommand("script …")`
+  does **not** work (hits Fusion's core channel); it must be wrapped in
+  `Electron.run "…"`.
 - A `.scr` **stops at the first failing command**, which can leave a partial
   change — sanity-check variant names before a big batch, and keep the run undoable.
 

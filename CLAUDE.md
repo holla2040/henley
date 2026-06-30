@@ -37,9 +37,12 @@ Hendley, "the Scrounger", in *The Great Escape*.)
   `load_swaps_json()`, `render_script()`. Turns a list of part swaps (designator
   + package variant + attributes) into the EAGLE command-line script the user
   runs in Fusion (`File > Execute Script`, or `neu_dev.run_text_command("SCRIPT
-  …")` in the text-command Py mode). The write side: the Electronics API is
-  read-only and the MCP bridge can't reach the command line, so Henley generates
-  the script and the user runs it. `CHANGE PACKAGE` precedes `ATTRIBUTE` per part
+  …")` in the text-command Py mode). The write side: the Electronics **object**
+  API is read-only, but the EAGLE command line **is** reachable from Python/MCP
+  via `executeTextCommand('Electron.run "script C:\\path\\changes.scr"')` — so
+  Henley can either hand the user the `.scr` *or* fire it into Fusion over the
+  bridge (see "Fusion access from WSL → write side" below). `CHANGE PACKAGE`
+  precedes `ATTRIBUTE` per part
   (variant switch can reset variant-default attrs); injection chars are rejected.
 - `src/henley/fusion.py` — Fusion Electronics bridge: the `DesignPart` model,
   `load_parts_json()` (ingest the parts-export contract), `enrich_with_jlc()`
@@ -158,15 +161,23 @@ below — to get its designator and the exact package variant names.) Drive it a
    (`mkdir -p ~/tmp/henley_output` first) — e.g.
    `henley scr ~/tmp/henley_output/swap.json -o ~/tmp/henley_output/changes.scr`.
    Keep the working tree clean.
-6. **Apply in Fusion, then reconcile.** The Electronics API is read-only (see
-   "Fusion access from WSL" below), so the user applies the change in Fusion: run
-   the `.scr` (*File > Execute
-   Script*) **and** set anything the script doesn't carry — **notably a changed
-   schematic VALUE** (e.g. 220 Ω → 330 Ω) — in Fusion as well. Fusion is the write
-   side for the whole change; setting the value there is a normal part of applying,
-   just like running the script (so tell the user to set it — do NOT hand-edit the
-   `.scr` to fake it). Then update the BOM record (the parts JSON) so the
-   designator points to the new code and a later `henley stock` reflects reality.
+6. **Apply in Fusion, then reconcile.** Fusion is the write side (the Electronics
+   *object* API is read-only). Two ways to apply the `.scr`:
+   - **Manual** — the user runs it: *File > Execute Script*.
+   - **Over the bridge (preferred when Fusion+MCP are reachable)** — fire it from
+     Python/MCP: `executeTextCommand('Electron.run "script C:\\tmp\\changes.scr"')`
+     via `fusion_mcp_execute` (see "Fusion access from WSL → write side" below).
+     This same channel can carry a **changed schematic VALUE** (e.g. 220 Ω →
+     330 Ω) as `Electron.run "VALUE R6 330"`, so the whole change can be one
+     scripted stream — no manual value-setting step required.
+
+   Either way: if you apply manually, also set anything the `.scr` doesn't carry
+   (notably the VALUE) in Fusion — do NOT hand-edit the `.scr` to fake a value.
+   `Electron.run` returns no echo, so **verify** with a scoped
+   `electronics.Attribute` read (live `part_object_id`) afterward, and remember
+   bridge changes are **unsaved** until the user saves in Fusion. Then update the
+   BOM record (the parts JSON) so the designator points to the new code and a
+   later `henley stock` reflects reality.
 
 **jlcsearch matching rules (so your flags actually match):**
 - `package` and other per-category **string** filters are **exact, case-
@@ -221,6 +232,41 @@ then `tools/call` with `fusion_mcp_electronics_read`. The JLC `Cxxxx` code is th
 part's **`LCSC`** attribute (read `electronics.Attribute` filtered by
 `part_object_id`); MPN is `MPN`. Requires Fusion running with **Preferences >
 General > API > Fusion MCP Server** enabled and an Electronics doc open.
+
+⚠️ **Attribute reads are part-scoped, and `object_id`s aren't stable.** Filtering
+`electronics.Attribute` by `name` alone (or unfiltered) returns **empty** — you
+must pass the live `part_object_id`. And `object_id`s are reassigned on every
+reload (R1 was `2812` one session, `11225` the next), so always re-read
+`electronics.Part` for the current id in the same session. (This — not "the
+reader can't see JLC attrs" — was the cause of earlier empty reads;
+`LCSC`/`MPN`/`MANUFACTURER` do read back fine when scoped.)
+
+## Fusion access from WSL (write side) — `Electron.run`
+
+The Electronics **object** API is read-only, but the **EAGLE command interpreter
+is reachable from Python/MCP** — the one thing we long thought impossible. The
+trick (Autodesk forum, verified live):
+
+```python
+import adsk.core
+app = adsk.core.Application.get()
+app.executeTextCommand('Electron.run "script C:\\tmp\\changes.scr"')
+```
+
+Run that string through `fusion_mcp_execute` (`featureType:"script"`). A **bare**
+`executeTextCommand("script …")` fails (`There is no command script`) because it
+hits Fusion's *core* channel; wrapping in **`Electron.run "<eagle cmd>"`** routes
+into the electronics interpreter. So Henley can apply a `.scr` (or any `CHANGE` /
+`ATTRIBUTE` / `VALUE` / `EXPORT` command) headlessly over the bridge. Rules:
+- **No return value** — `Electron.run` yields `''` on success; verify out-of-band
+  (scoped `electronics.Attribute` read, or an `EXPORT PARTLIST <file>` you read).
+- **Fusion-host paths** — Fusion is on Windows; WSL `~/tmp/x.scr` ↔ `C:\tmp\x.scr`
+  (`~/tmp` → `/mnt/c/tmp` on `hendrix`). Double the backslashes in the Python
+  literal; nest the quotes (`'Electron.run "script C:\\tmp\\x.scr"'`).
+- **`.scr` stops at the first failing command**; changes are **unsaved** until the
+  user saves in Fusion (reopening reverts them).
+- Full detail + the verification matrix: **`docs/fusion-notes.md` → "The WRITE
+  path"**.
 
 ⚠️ **WSL port-forward gotcha (cost us a debugging session):** to reach Fusion's
 Windows-loopback port from WSL2, forward it on Windows with
