@@ -47,9 +47,9 @@ out the trade-off so you can pick. See
 pick the replacements, and it generates a Fusion `.scr` script that applies the
 package + part-number changes ([The `.scr` file format](#the-scr-file-format)).
 The Fusion Electronics *object* API is read-only — **but the EAGLE command line
-is reachable from Python/MCP** via
+is reachable from Python over HTTP** via
 `executeTextCommand('Electron.run "script C:\\path\\changes.scr"')`, so Hendley can
-fire the `.scr` straight into the running schematic over the bridge (no manual
+fire the `.scr` straight into the running schematic over the HTTP bridge (no manual
 *Execute Script* step). That closes the loop: writing the new JLC part number
 back into the schematic at the new package size, turning a whole-board package
 migration from a day of manual searching into a single query. The point of all
@@ -267,24 +267,28 @@ Signing has been verified empirically against the live API:
 So signing is proven correct — the account just needs the component API
 permission enabled in the JLC console.
 
-## Reading from Fusion Electronics (no MCP client required)
+## Reading from Fusion Electronics over HTTP (no MCP connector)
 
-Hendley reads a live Autodesk Fusion design over **plain HTTP** — it issues
-JSON-RPC `POST`s directly to the local endpoint Fusion exposes at
-`http://127.0.0.1:27182/mcp`. **You do not need any MCP client or middleware**
-to use it: no Claude Desktop "Autodesk Fusion" extension, no MCP connector, and
-no `claude mcp add` registration. The endpoint speaks the MCP wire protocol, but
-from Hendley's side it is just an HTTP API you `POST` to with `curl` / `requests`.
+**Hendley talks to Fusion over plain HTTP only — there is no MCP connector or
+client anywhere in this project, and you do not need one.** Hendley reads a live
+Autodesk Fusion design by issuing JSON-RPC `POST`s directly to the local endpoint
+Fusion exposes, with `curl` / `requests`. **All communication is HTTP**: no
+Claude Desktop "Autodesk Fusion" connector, no MCP client library, no `claude mcp
+add` registration. You invoke the **`fusion_mcp_electronics_read`** tool (that is
+simply its name) by `POST`ing an HTTP `tools/call` request — over HTTP, never
+through a connector.
+
 The handshake has a few non-obvious steps (Windows-host IP not `127.0.0.1` from
-WSL, capture the `MCP-Session-Id` header, send `notifications/initialized` before
-any `tools/call`) — copy the complete, verified recipe and a worked example from
-[`docs/fusion-notes.md`](docs/fusion-notes.md) → "Connecting from WSL — the full
-handshake"; each part's JLC `Cxxxx` code is its `LCSC` attribute.
+WSL, capture the `MCP-Session-Id` HTTP header, send `notifications/initialized`
+before any `tools/call`) — copy the complete, verified HTTP recipe and a worked
+example from [`docs/fusion-notes.md`](docs/fusion-notes.md) → "Talking to Fusion
+over HTTP — the full recipe"; each part's JLC `Cxxxx` code is its `LCSC` attribute.
 
 The only requirement on the **Windows / Fusion side** is that Fusion is running
-with its built-in server enabled — **Preferences > General > API > Fusion MCP
-Server** — and an Electronics document open. That is what publishes the HTTP
-endpoint; nothing else needs to be installed.
+with its built-in HTTP endpoint enabled — the **Preferences > General > API >
+Fusion MCP Server** toggle (this Autodesk setting is the *only* thing here named
+"MCP"; it just publishes the HTTP endpoint Hendley then talks to) — and an
+Electronics document open. Nothing else needs to be installed.
 
 ### Reaching it from WSL2 (networking note)
 
@@ -348,8 +352,8 @@ with `Electron.run` — see step 5). `comet` below is just an example design.
 
 **Before you start**
 
-1. Fusion is running with an **Electronics document open** and the **MCP Server
-   enabled** (see [Reading from Fusion Electronics](#reading-from-fusion-electronics-no-mcp-client-required)).
+1. Fusion is running with an **Electronics document open** and its HTTP endpoint
+   enabled via the **Fusion MCP Server** toggle (see [Reading from Fusion Electronics over HTTP](#reading-from-fusion-electronics-over-http-no-mcp-connector)).
 2. Under WSL2, the port forward is up (same section,
    [networking note](#reaching-it-from-wsl2-networking-note)).
 3. Your `.keys` file is in place (or use the `PYTHONPATH=src` fallback above).
@@ -377,13 +381,13 @@ with `Electron.run` — see step 5). `comet` below is just an example design.
      `neu_dev.run_text_command("SCRIPT …")` line in the text-command Py mode), then
      set anything the script doesn't carry — **notably a changed schematic value**
      (e.g. 220 Ω → 330 Ω) — in Fusion as well.
-   - **Over the bridge** — have Claude fire it with
-     `executeTextCommand('Electron.run "script C:\\tmp\\changes.scr"')` via the MCP
-     `fusion_mcp_execute` tool. The same channel sets the value
+   - **Over the HTTP bridge** — have Claude fire it with
+     `executeTextCommand('Electron.run "script C:\\tmp\\changes.scr"')` via the
+     `fusion_mcp_execute` tool (called over HTTP). The same channel sets the value
      (`Electron.run "VALUE R6 330"`), so the whole change is one scripted stream.
      `Electron.run` returns nothing, so Claude verifies by re-reading; changes are
      **unsaved** until you save in Fusion. (Details:
-     [Reading from Fusion Electronics](#reading-from-fusion-electronics-no-mcp-client-required)
+     [Reading from Fusion Electronics](#reading-from-fusion-electronics-over-http-no-mcp-connector)
      and `docs/fusion-notes.md` → "The WRITE path".)
 6. **Verify** — ask Claude to re-read the design and confirm each part landed on
    the new package, attributes, and value.
@@ -550,7 +554,7 @@ on **horton** (the Linux dev box), session
 5. **Add the Fusion Electronics bridge.** On **hendrix** (the Windows box
    running Autodesk Fusion), Hendley was extended to read a live electronics
    design over plain HTTP (see
-   [Reading from Fusion Electronics](#reading-from-fusion-electronics-no-mcp-client-required)).
+   [Reading from Fusion Electronics](#reading-from-fusion-electronics-over-http-no-mcp-connector)).
    Introspecting a real design answered the key open question — the JLCPCB
    `Cxxxx` code is stored as each part's **`LCSC`** attribute — which lets the
    extractor produce `hendley_parts.json` and feed those codes straight into the

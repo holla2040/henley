@@ -38,8 +38,8 @@ Hendley, "the Scrounger", in *The Great Escape*.)
   + package variant + attributes) into the EAGLE command-line script the user
   runs in Fusion (`File > Execute Script`, or `neu_dev.run_text_command("SCRIPT
   …")` in the text-command Py mode). The write side: the Electronics **object**
-  API is read-only, but the EAGLE command line **is** reachable from Python/MCP
-  via `executeTextCommand('Electron.run "script C:\\path\\changes.scr"')` — so
+  API is read-only, but the EAGLE command line **is** reachable over the HTTP
+  endpoint via `executeTextCommand('Electron.run "script C:\\path\\changes.scr"')` — so
   Hendley can either hand the user the `.scr` *or* fire it into Fusion over the
   bridge (see "Fusion access from WSL → write side" below). `CHANGE PACKAGE`
   precedes `ATTRIBUTE` per part
@@ -164,9 +164,9 @@ below — to get its designator and the exact package variant names.) Drive it a
 6. **Apply in Fusion, then reconcile.** Fusion is the write side (the Electronics
    *object* API is read-only). Two ways to apply the `.scr`:
    - **Manual** — the user runs it: *File > Execute Script*.
-   - **Over the bridge (preferred when Fusion+MCP are reachable)** — fire it from
-     Python/MCP: `executeTextCommand('Electron.run "script C:\\tmp\\changes.scr"')`
-     via `fusion_mcp_execute` (see "Fusion access from WSL → write side" below).
+   - **Over the HTTP bridge (preferred when Fusion's endpoint is reachable)** — fire it from
+     Python over HTTP: `executeTextCommand('Electron.run "script C:\\tmp\\changes.scr"')`
+     via the `fusion_mcp_execute` tool (see "Fusion access from WSL → write side" below).
      This same channel can carry a **changed schematic VALUE** (e.g. 220 Ω →
      330 Ω) as `Electron.run "VALUE R6 330"`, so the whole change can be one
      scripted stream — no manual value-setting step required.
@@ -226,21 +226,31 @@ Null body fields are omitted to match the Java SDK's `toJSON()`.
 
 ## Fusion access from WSL (read side)
 
-Hendley reads a live Fusion Electronics design over plain HTTP (an MCP
-Streamable-HTTP / JSON-RPC server) — no MCP client needed, plain `curl` works.
-But the handshake is **not** "just POST initialize then tools/call": you must hit
+**Access is 100% plain HTTP — this project uses NO MCP connector or client.**
+Hendley reads a live Fusion Electronics design by issuing JSON-RPC `POST`s
+directly to Fusion's local HTTP endpoint with `curl`/`requests`. Do **not** use
+Claude Desktop's "Autodesk Fusion" connector, an MCP client, or `claude mcp add`
+— there is none in this project, and you don't need one. **All communication is
+HTTP.** You call the **`fusion_mcp_electronics_read`** tool by `POST`ing a
+`tools/call` request over HTTP (that's the tool's literal name — it is invoked
+via HTTP, not through any MCP client).
+
+The handshake is **not** "just POST initialize then tools/call": you must hit
 the **Windows host IP, not `127.0.0.1`** (loopback isn't reachable from WSL),
-capture the **`MCP-Session-Id` response header** and resend it on every call, and
-send a **`notifications/initialized`** message before any `tools/call` — skip any
-of these and you get the confusing `Missing MCP-Session-Id header` /
-`Session not initialized` errors that have made past agents hand-write their own
-client. **Do not re-derive it or read source — copy the complete, verified
-recipe (handshake + a Part→Attribute→`LCSC` worked example) from
-`docs/fusion-notes.md` → "Connecting from WSL — the full handshake".** The JLC
-`Cxxxx` code is the part's **`LCSC`** attribute (read `electronics.Attribute`
-filtered by `part_object_id`); MPN is `MPN`. Requires Fusion running with
-**Preferences > General > API > Fusion MCP Server** enabled and an Electronics
-doc open.
+capture the **`MCP-Session-Id` HTTP response header** and resend it on every
+request, and `POST` a **`notifications/initialized`** message before any
+`tools/call` — skip any of these and you get the confusing `Missing
+MCP-Session-Id header` / `Session not initialized` errors that have made past
+agents hand-write their own client. **Do not re-derive it or read source — copy
+the complete, verified HTTP recipe (handshake + a Part→Attribute→`LCSC` worked
+example) from `docs/fusion-notes.md` → "Talking to Fusion over HTTP — the full
+recipe".** The JLC `Cxxxx` code is the part's **`LCSC`** attribute (read
+`electronics.Attribute` filtered by `part_object_id`); MPN is `MPN`.
+
+The one setup requirement is on the Fusion/Windows side: Fusion running with an
+Electronics doc open and its endpoint enabled at **Preferences > General > API >
+Fusion MCP Server** (this Autodesk toggle is the *only* thing called "MCP" — it
+just publishes the HTTP endpoint Hendley then talks to).
 
 ⚠️ **Attribute reads are part-scoped, and `object_id`s aren't stable.** Filtering
 `electronics.Attribute` by `name` alone (or unfiltered) returns **empty** — you
@@ -253,8 +263,8 @@ reader can't see JLC attrs" — was the cause of earlier empty reads;
 ## Fusion access from WSL (write side) — `Electron.run`
 
 The Electronics **object** API is read-only, but the **EAGLE command interpreter
-is reachable from Python/MCP** — the one thing we long thought impossible. The
-trick (Autodesk forum, verified live):
+is reachable over the same HTTP endpoint** — the one thing we long thought
+impossible. The trick (Autodesk forum, verified live):
 
 ```python
 import adsk.core
@@ -262,7 +272,8 @@ app = adsk.core.Application.get()
 app.executeTextCommand('Electron.run "script C:\\tmp\\changes.scr"')
 ```
 
-Run that string through `fusion_mcp_execute` (`featureType:"script"`). A **bare**
+Run that string through the `fusion_mcp_execute` tool (called over HTTP, same as
+the read tool — `featureType:"script"`). A **bare**
 `executeTextCommand("script …")` fails (`There is no command script`) because it
 hits Fusion's *core* channel; wrapping in **`Electron.run "<eagle cmd>"`** routes
 into the electronics interpreter. So Hendley can apply a `.scr` (or any `CHANGE` /

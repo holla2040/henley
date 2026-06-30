@@ -1,18 +1,26 @@
 # Fusion Electronics — introspection notes (hendrix)
 
-Recorded from a **live** Autodesk Fusion session via the Fusion MCP server,
-reached from WSL2 Claude Code over a Windows port-forward (see the README
-"Fusion MCP from WSL" section). Active design at capture: **`comet`**
-(schematic-only — no board yet).
+Recorded from a **live** Autodesk Fusion session, reached from WSL2 Claude Code
+**over plain HTTP** (JSON-RPC `POST`s) through a Windows port-forward (see the
+README "Reading from Fusion Electronics" section). Active design at capture:
+**`comet`** (schematic-only — no board yet).
 
-## Connecting from WSL — the full handshake (copy-paste, verified)
+> **This project talks to Fusion over HTTP only — there is NO MCP connector or
+> client involved.** Fusion publishes a local HTTP endpoint (you enable it with
+> the **Preferences > General > API > "Fusion MCP Server"** toggle — that Autodesk
+> setting is the *only* thing here named "MCP"). From that point on it is just an
+> HTTP API: you `POST` JSON-RPC to it with `curl`/`requests` and call the
+> **`fusion_mcp_electronics_read`** tool (its literal name) over HTTP. Do **not**
+> use Claude Desktop's "Autodesk Fusion" connector, an MCP client library, or
+> `claude mcp add` — none exists in this project and none is needed.
 
-The bridge is an MCP **Streamable HTTP** server. You do **not** need an MCP
-client — plain `curl` works — but the handshake has steps that, if skipped, fail
-with confusing errors. **This is the layer that isn't written down anywhere else,
-so every agent re-derives it (or hand-writes a `bridge.py`).** Here it is, end to
-end, exactly as verified live. Don't read source or invent your own client — run
-this.
+## Talking to Fusion over HTTP — the full recipe (copy-paste, verified)
+
+Plain `curl` over HTTP is all you need — but the JSON-RPC handshake has steps
+that, if skipped, fail with confusing errors. **This is the layer that isn't
+written down anywhere else, so every agent re-derives it (or hand-writes a
+`bridge.py`).** Here it is, end to end, exactly as verified live. Don't read
+source or invent your own client — run this.
 
 **The rules that bite (each one cost a debugging session to rediscover):**
 - **Never `127.0.0.1` from WSL.** Fusion listens on the *Windows* loopback; from
@@ -75,7 +83,8 @@ codes to `hendley detail`/`hendley stock` for live JLC stock/price.
 
 ## How the design is read
 
-The Fusion MCP exposes one read tool for Electronics:
+Fusion's HTTP endpoint exposes one read tool for Electronics (called over HTTP
+via a `tools/call` `POST`):
 
 - `fusion_mcp_electronics_read(entity_type, object?)`
   - `entity_type`: one of `electronics.<Class>` (e.g. `electronics.Part`,
@@ -157,14 +166,14 @@ Caveats seen in real data:
 `electronics.Schematic` row `name` is a temp path ending in `comet sch.sch`;
 the design/document name is taken as **`comet`**.
 
-## ⭐ The WRITE path — driving the EAGLE command line from Python/MCP (RESOLVED)
+## ⭐ The WRITE path — driving the EAGLE command line over HTTP (RESOLVED)
 
 **Background / the old wrong conclusion.** The Fusion *Electronics object API*
 (`adsk` / `fusion_mcp_electronics_read` / `…_update`) is read-only for our
 purposes — you can read the design but not mutate part attributes/packages
 through it. The only write channel is the **EAGLE-style command interpreter**
 (the schematic command line, `.scr` scripts, ULPs). An earlier investigation
-concluded the MCP bridge **couldn't** reach that interpreter, because a bare
+concluded the HTTP bridge **couldn't** reach that interpreter, because a bare
 
 ```python
 app.executeTextCommand("script C:\\tmp\\my.scr")   # ❌ RuntimeError: There is no command script
@@ -185,9 +194,9 @@ app = adsk.core.Application.get()
 app.executeTextCommand('Electron.run "script C:\\tmp\\changes.scr"')
 ```
 
-Run it via the MCP `fusion_mcp_execute` tool (`featureType:"script"`, a
-`def run(_context):` that calls `executeTextCommand`). This makes the **entire
-write path scriptable from Python/MCP over the WSL bridge** — Hendley can generate
+Run it via the `fusion_mcp_execute` tool (called over HTTP, `featureType:"script"`,
+a `def run(_context):` that calls `executeTextCommand`). This makes the **entire
+write path scriptable from Python over HTTP** — Hendley can generate
 a `.scr` and fire it into Fusion with no manual step.
 
 **What we verified (live, on `comet sch`):**
